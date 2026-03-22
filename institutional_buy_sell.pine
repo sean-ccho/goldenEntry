@@ -1,0 +1,471 @@
+// ============================================================
+// INSTITUTIONAL GOLDEN ENTRY v3.0
+// Smart Money Concept + Wyckoff + Volume Delta + RSI Divergence
+// Designed for: Low-Risk Bottom Accumulation & Trend Exits
+// ============================================================
+//@version=5
+indicator("Institutional Buy & Sell [SMC + Wyckoff]", overlay=true, max_bars_back=500)
+
+// ============================================================
+// ─────────────────── USER INPUTS ────────────────────────────
+// ============================================================
+grp1 = "📊 Trend Filter"
+ema_fast   = input.int(50,  "Fast EMA",  group=grp1)
+ema_slow   = input.int(200, "Slow EMA",  group=grp1)
+useWeeklyTrend = input.bool(true, "Weekly Trend Confirmation (Higher TF)", group=grp1)
+
+grp2 = "🔥 Volume Settings"
+vol_len    = input.int(20,  "Volume MA Length",   group=grp2)
+vol_mult   = input.float(1.5, "Volume Spike Mult", step=0.1, group=grp2)
+
+grp3 = "📐 RSI Settings"
+rsi_len    = input.int(14, "RSI Length", group=grp3)
+rsi_ob     = input.int(70, "RSI Overbought", group=grp3)
+rsi_os     = input.int(30, "RSI Oversold",   group=grp3)
+
+grp4 = "💡 Signal Settings"
+show_buy   = input.bool(true, "Show BUY signals",  group=grp4)
+show_sell  = input.bool(true, "Show SELL signals", group=grp4)
+show_zones = input.bool(true, "Show Support/Resistance Zones", group=grp4)
+show_sl_tp = input.bool(true, "Show Stop Loss / Take Profit", group=grp4)
+
+// ============================================================
+// ─────────────── 1. MULTI-TIMEFRAME TREND ───────────────────
+// ============================================================
+// Higher timeframe EMA for context (Weekly)
+ema_fast_v   = ta.ema(close, ema_fast)
+ema_slow_v   = ta.ema(close, ema_slow)
+
+// Weekly trend confirmation via security call
+weeklyClose  = request.security(syminfo.tickerid, "W", close, lookahead=barmerge.lookahead_off)
+weeklyEma50  = request.security(syminfo.tickerid, "W", ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+weeklyAbove  = not useWeeklyTrend or (weeklyClose > weeklyEma50)
+
+// Trend classification
+isBullTrend  = ema_fast_v > ema_slow_v and close > ema_slow_v
+isBearTrend  = ema_fast_v < ema_slow_v and close < ema_slow_v
+
+// Golden / Death Cross detection
+goldenCross  = ta.crossover(ema_fast_v, ema_slow_v)
+deathCross   = ta.crossunder(ema_fast_v, ema_slow_v)
+
+// ============================================================
+// ─────────────── 1b. VWAP (기관 평균 매수가) ────────────────
+// ============================================================
+vwapVal      = ta.vwap(hlc3)
+aboveVWAP    = close > vwapVal
+belowVWAP    = close < vwapVal
+
+// ============================================================
+// ─────────────── 1c. 52주 범위 (연간 가격 위치) ─────────────
+// ============================================================
+high52w      = request.security(syminfo.tickerid, "W", ta.highest(high, 52), lookahead=barmerge.lookahead_off)
+low52w       = request.security(syminfo.tickerid, "W", ta.lowest(low, 52),   lookahead=barmerge.lookahead_off)
+range52w     = (close - low52w) / math.max(high52w - low52w, 0.01) * 100  // 0%=52주 저점, 100%=52주 고점
+
+// ============================================================
+// ─────────────── 1d. ADX (추세 강도) ────────────────────────
+// ============================================================
+[diPlus, diMinus, adxVal] = ta.dmi(14, 14)
+isStrongTrend = adxVal > 25
+isWeakTrend   = adxVal < 20
+
+// ============================================================
+// ─────────────── 1e. BB SQUEEZE (변동성 수축 → 폭발 임박) ────
+// ============================================================
+bbLen        = 20
+bbMult       = 2.0
+bbBasis      = ta.sma(close, bbLen)
+bbDev        = bbMult * ta.stdev(close, bbLen)
+bbUpper      = bbBasis + bbDev
+bbLower      = bbBasis - bbDev
+bbWidth      = (bbUpper - bbLower) / bbBasis
+bbWidthMin   = ta.lowest(bbWidth, 50)
+isSqueeze    = bbWidth <= bbWidthMin * 1.05  // BB 폭이 50봉 최저 근처 = 스퀴즈
+
+// ============================================================
+// ─────────────── 2. WYCKOFF ACCUMULATION ZONE ───────────────
+// ============================================================
+// Identify potential Wyckoff Spring: price dips below recent low then recovers
+lookback     = 20
+swingLow     = ta.lowest(low, lookback)
+swingHigh    = ta.highest(high, lookback)
+
+// Spring: Shakeout below accumulated range
+isSpring     = low < swingLow[1] and close > swingLow[1]
+
+// Sign of Strength: Strong close after spring with range expansion
+rangeSize    = high - low
+bodySize     = math.abs(close - open)
+isStrengthBar = close > open and bodySize > rangeSize * 0.55
+
+// Wyckoff Accumulation: price near structural support in a sideways range
+rangeHigh    = ta.highest(high, 40)
+rangeLow     = ta.lowest(low, 40)
+rangeWidth   = rangeHigh - rangeLow
+inAccumZone  = (close - rangeLow) / math.max(rangeWidth, 0.01) < 0.35  // bottom 35% of range
+
+// ============================================================
+// ─────────────── 3. RSI DIVERGENCE DETECTION ────────────────
+// ============================================================
+rsiVal       = ta.rsi(close, rsi_len)
+
+// Bullish Divergence: price makes lower low, RSI makes higher low
+priceLow1    = ta.lowest(low, 5)
+priceLow2    = ta.lowest(low[5], 5)
+rsiLow1      = ta.lowest(rsiVal, 5)
+rsiLow2      = ta.lowest(rsiVal[5], 5)
+
+bullDiv      = priceLow1 < priceLow2 and rsiLow1 > rsiLow2 and rsiVal < 50
+
+// Bearish Divergence: price makes higher high, RSI makes lower high
+priceHigh1   = ta.highest(high, 5)
+priceHigh2   = ta.highest(high[5], 5)
+rsiHigh1     = ta.highest(rsiVal, 5)
+rsiHigh2     = ta.highest(rsiVal[5], 5)
+
+bearDiv      = priceHigh1 > priceHigh2 and rsiHigh1 < rsiHigh2 and rsiVal > 50
+
+// ============================================================
+// ─────────────── 4. VOLUME ANALYSIS (SMART MONEY) ───────────
+// ============================================================
+volSma       = ta.sma(volume, vol_len)
+rvol         = volume / volSma
+
+// High-volume breakout (smart money entering)
+isHighVol    = rvol > vol_mult
+
+// Volume climax top: extreme volume at high price = distribution
+volClimax    = rvol > 2.5 and close < open  // big red candle on massive volume = selling climax potential BUY countertrend
+                                             // OR distribution if at highs
+
+// Volume dry-up = smart money absorbed all selling, ready to move
+volDryUp     = rvol < 0.6  // very quiet volume = no sellers left
+
+// Average volume in last 3 bars before signal
+avgRecentVol = (volume + volume[1] + volume[2]) / 3
+volPickup    = volume > avgRecentVol * 1.2  // volume building up
+
+// ============================================================
+// ─────────────── 5. SMART MONEY CONCEPT (SMC) ───────────────
+// ─── Order Blocks + Break of Structure ──────────────────────
+// ============================================================
+// Bearish Order Block: last significant down-candle before a down-move reversal
+// (institutions sell here, we look for reaction)
+bullOB_high  = ta.highest(high[1], 3)
+bullOB_low   = ta.lowest(low[1], 3)
+
+// Break of Structure (BOS) - Bullish: price closes above recent swing high
+bos_high     = ta.highest(high, 10)
+bosBreakUp   = close > bos_high[1]  // Break of structure to the upside
+
+// Change of Character (CHoCH): first sign of trend reversal
+// Bearish structure: series of lower highs → now breaks one
+prevHighs    = ta.highest(high, 15)
+choch_bull   = close > prevHighs[1] and isBearTrend[1]  // breaking bearish structure
+
+// ============================================================
+// ─────────────── 6. MOMENTUM CONFIRMATION ───────────────────
+// ============================================================
+// MACD for momentum confirmation
+[macdLine, signalLine, histLine] = ta.macd(close, 12, 26, 9)
+macdCrossUp   = ta.crossover(macdLine, signalLine)
+macdCrossDown = ta.crossunder(macdLine, signalLine)
+macdPositive  = macdLine > signalLine and macdLine > 0
+macdNegative  = macdLine < signalLine and macdLine < 0
+
+// Stochastic for oversold/overbought
+stochK = ta.sma(ta.stoch(close, high, low, 14), 3)
+stochD = ta.sma(stochK, 3)
+stochOS = stochK < 20 and stochD < 20
+stochOB = stochK > 80 and stochD > 80
+stochCrossUp   = ta.crossover(stochK, stochD) and stochK < 30
+stochCrossDown = ta.crossunder(stochK, stochD) and stochK > 70
+
+// ============================================================
+// ─────────────── 7. CANDLE PATTERN RECOGNITION ──────────────
+// ============================================================
+// Bullish Engulfing
+bullEngulf   = close > open and close[1] < open[1] and 
+               close > open[1] and open < close[1]
+
+// Hammer / Pin Bar (shakeout candle)
+lowerWick    = open > close ? (close - low) : (open - low)
+upperWick    = open > close ? (high - open) : (high - close)
+hammerBody   = math.abs(close - open)
+isHammer     = lowerWick > hammerBody * 2 and upperWick < hammerBody * 0.5 and 
+               lowerWick > (high - low) * 0.55
+
+// Bullish Harami
+bullHarami   = close[1] < open[1] and close > open and
+               close < open[1] and open > close[1]
+
+// Morning Star (3-candle reversal)
+mornStar     = close[2] < open[2] and                                  // first: bearish
+               math.abs(close[1] - open[1]) < (high[1] - low[1]) * 0.3 and  // second: doji/small
+               close > open and close > (open[2] + close[2]) / 2       // third: bullish engulf
+
+// Bearish Engulfing
+bearEngulf   = close < open and close[1] > open[1] and
+               close < open[1] and open > close[1]
+
+// Shooting Star
+isShootingStar = upperWick > hammerBody * 2 and lowerWick < hammerBody * 0.5 and
+                 upperWick > (high - low) * 0.55 and close < open
+
+// ============================================================
+// ─────────────── 8. SUPPORT / RESISTANCE ZONES ──────────────
+// ============================================================
+// Pivot-based S/R
+pivotHigh    = ta.pivothigh(high, 5, 5)
+pivotLow     = ta.pivotlow(low, 5, 5)
+
+// ============================================================
+// ─────────────── 9. ACCUMULATION ZONE BUY LOGIC ─────────────
+// ── 핵심 철학: 가격이 저점 근처에 있을 때만 BUY 발동 ──────────
+// ============================================================
+
+// [ GATE 조건 ] 최근 30봉 중 하위 30% 구간에 있어야 함 (매집 구간 필터)
+recentHigh30 = ta.highest(high, 30)
+recentLow30  = ta.lowest(low, 30)
+rangePos     = (close - recentLow30) / math.max(recentHigh30 - recentLow30, 0.01)
+nearBottom   = rangePos < 0.30  // 저점 근처 30% 이내
+
+// [ GATE 조건 ] RSI가 50 미만 (아직 오버바트 아님)
+rsiGate      = rsiVal < 50
+
+// 매집 스코어 (GATE 조건 통과 시 세부 점수 합산)
+accumScore = 0.0
+
+// ─ 저점 깊이 (얼마나 바닥에 가까운지)
+accumScore := accumScore + (rangePos < 0.15 ? 20 : rangePos < 0.25 ? 12 : 0)
+
+// ─ RSI 과매도 강도
+accumScore := accumScore + (rsiVal < rsi_os ? 20 : rsiVal < rsi_os + 10 ? 10 : 0)
+
+// ─ 불리시 다이버전스 (가장 신뢰성 높은 반전 신호)
+accumScore := accumScore + (bullDiv ? 25 : 0)
+
+// ─ Wyckoff Spring (가격이 저점 아래로 찔렸다가 회복)
+accumScore := accumScore + (isSpring ? 20 : 0)
+
+// ─ 거래량 패턴
+accumScore := accumScore + (volClimax ? 15 : 0)       // 매도 폭발 후 하락 = 세력 매집 가능
+accumScore := accumScore + (volDryUp ? 10 : 0)         // 거래량 소멸 = 매도세 소진
+accumScore := accumScore + (isHighVol and close > open ? 15 : 0)  // 고거래량 양봉 = 세력 진입
+
+// ─ 캔들 반전 패턴
+accumScore := accumScore + (mornStar ? 25 : 0)         // 모닝스타 (최강 반전)
+accumScore := accumScore + (isHammer ? 20 : 0)         // 망치형 (꼬리 긺 = 매수세)
+accumScore := accumScore + (bullEngulf ? 15 : 0)       // 상승 장악
+accumScore := accumScore + (bullHarami ? 8  : 0)       // 배내 패턴
+
+// ─ 모멘텀 반전
+accumScore := accumScore + (stochCrossUp ? 15 : 0)    // 스토캐스틱 골든크로스 (과매도에서)
+accumScore := accumScore + (macdCrossUp ? 10 : 0)     // MACD 반전
+
+// ─ SMC / 구조 반전
+accumScore := accumScore + (choch_bull ? 12 : 0)      // 베어 구조에서 첫 고점 돌파
+
+// ─ VWAP (기관 평균가보다 싸게 매수)
+accumScore := accumScore + (belowVWAP ? 10 : 0)
+
+// ─ BB Squeeze (변동성 수축 → 곧 폭발)
+accumScore := accumScore + (isSqueeze ? 12 : 0)
+
+// ============================================================
+// ─────────────── 10. SELL SIGNAL LOGIC ──────────────────────
+// ============================================================
+sellScore = 0.0
+
+// 추세 완전 붕괴
+sellScore := sellScore + (isBearTrend ? 20 : 0)
+sellScore := sellScore + (deathCross ? 15 : 0)
+
+// 과매수 구간
+sellScore := sellScore + (rsiVal > rsi_ob - 5 ? 10 : 0)
+sellScore := sellScore + (bearDiv ? 20 : 0)
+sellScore := sellScore + (stochCrossDown ? 12 : 0)
+sellScore := sellScore + (macdCrossDown ? 12 : 0)
+
+// 분산 / 고점에서 고거래량 하락
+sellScore := sellScore + (volClimax and rsiVal > 60 ? 20 : 0)
+sellScore := sellScore + (isHighVol and close < open and rsiVal > 65 ? 15 : 0)
+
+// VWAP 붕괴 (가격이 기관 평균 매수가 아래로)
+sellScore := sellScore + (belowVWAP and rsiVal > 50 ? 8 : 0)
+
+// 고점 근처 (상위 25% 이상) + 베어리시 캔들
+recentHighPos = (close - recentLow30) / math.max(recentHigh30 - recentLow30, 0.01) > 0.70
+sellScore := sellScore + (recentHighPos and bearEngulf ? 20 : 0)
+sellScore := sellScore + (recentHighPos and isShootingStar ? 15 : 0)
+
+// 구조 붕괴
+sellScore := sellScore + (close < ta.lowest(low[1], 10) ? 10 : 0)
+
+// ============================================================
+// ─────────────── 11. FINAL SIGNAL GENERATION ────────────────
+// ============================================================
+// [ BUY ] GATE 조건 필수 + 스코어 임계값
+ACCUM_THRESHOLD = 45  // 45점 이상 + 저점 근처 + RSI<50 → BUY
+SELL_THRESHOLD  = 50
+
+// GATE: 반드시 저점 근처 + RSI<50를 통과해야 BUY 발동
+accumGate = nearBottom and rsiGate
+
+buySignalRaw  = accumGate and accumScore >= ACCUM_THRESHOLD and show_buy
+anySell       = sellScore >= SELL_THRESHOLD and show_sell
+
+// 신호 중복 방지: BUY 5봉, SELL 5봉 이내 재발동 금지
+var int lastBuyBar  = -10
+var int lastSellBar = -10
+buySignal  = buySignalRaw  and (bar_index - lastBuyBar  >= 5)
+sellSignal = anySell       and (bar_index - lastSellBar >= 5)
+
+if buySignal
+    lastBuyBar := bar_index
+if sellSignal
+    lastSellBar := bar_index
+
+// ============================================================
+// ─────────────── 12. STOP LOSS / TAKE PROFIT ────────────────
+// ============================================================
+// ATR-based dynamic SL/TP (institutional standard)
+atrLen   = 14
+atrVal   = ta.atr(atrLen)
+
+// For buy signals: SL below recent swing low, TP at 2:1 and 3:1 R:R
+slBuy    = ta.lowest(low, 5) - atrVal * 0.5
+tp1Buy   = close + (close - slBuy) * 2.0   // 2R target
+tp2Buy   = close + (close - slBuy) * 3.0   // 3R target
+
+// For sell signals
+slSell   = ta.highest(high, 5) + atrVal * 0.5
+tp1Sell  = close - (slSell - close) * 2.0
+tp2Sell  = close - (slSell - close) * 3.0
+
+// ============================================================
+// ─────────────── 13. VISUALIZATION ─────────────────────────
+// ============================================================
+
+// ── EMAs ──────────────────────────────────────────────────
+plot(ema_fast_v, color=color.new(color.aqua, 30),  title="EMA 50",  linewidth=1)
+plot(ema_slow_v, color=color.new(color.orange, 0), title="EMA 200", linewidth=2)
+plot(vwapVal,    color=color.new(color.purple, 0), title="VWAP",    linewidth=2, style=plot.style_circles)
+
+// ── BUY Signal: 초록 위쪽 화살표 ─────────────────────────────
+plotshape(buySignal,
+          title="BUY",
+          text="BUY",
+          style=shape.arrowup,
+          location=location.belowbar,
+          color=color.new(color.lime, 0),
+          textcolor=color.black,
+          size=size.huge)
+
+// ── SELL Signal: 빨간 아래쪽 화살표 ──────────────────────────
+plotshape(sellSignal,
+          title="SELL",
+          text="SELL",
+          style=shape.arrowdown,
+          location=location.abovebar,
+          color=color.new(color.red, 0),
+          textcolor=color.black,
+          size=size.huge)
+
+// ── 투자자 대시보드 테이블 (우상단) ───────────────────────────
+var table dash = table.new(position.top_right, 2, 14, bgcolor=color.new(color.black, 15), border_color=color.new(color.gray, 60), border_width=1, frame_color=color.gray, frame_width=1)
+
+// ─ Header
+table.cell(dash, 0, 0, "INDICATOR",  text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 10))
+table.cell(dash, 1, 0, "STATUS",     text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 10))
+
+// ─ Row 1: Trend (추세)
+trendTxt = isBullTrend ? "▲ BULL" : isBearTrend ? "▼ BEAR" : "— NEUTRAL"
+trendBg  = isBullTrend ? color.new(color.lime, 20) : isBearTrend ? color.new(color.red, 20) : color.new(color.gray, 40)
+table.cell(dash, 0, 1, "Trend",    text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 1, trendTxt,   text_color=color.white, text_size=size.small, bgcolor=trendBg)
+
+// ─ Row 2: VWAP (기관 평균 매수가)
+vwapTxt = aboveVWAP ? "Above ▲" : "Below ▼"
+vwapBg  = aboveVWAP ? color.new(color.lime, 20) : color.new(color.red, 20)
+table.cell(dash, 0, 2, "VWAP",    text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 2, vwapTxt + " $" + str.tostring(math.round(vwapVal, 2)), text_color=color.white, text_size=size.small, bgcolor=vwapBg)
+
+// ─ Row 3: RSI (과매수/과매도)
+rsiTxt = rsiVal < rsi_os ? "OVERSOLD" : rsiVal > rsi_ob ? "OVERBOUGHT" : str.tostring(math.round(rsiVal, 1))
+rsiBg  = rsiVal < rsi_os ? color.new(color.lime, 20) : rsiVal > rsi_ob ? color.new(color.red, 20) : rsiVal < 40 ? color.new(color.teal, 30) : rsiVal > 60 ? color.new(color.orange, 30) : color.new(color.gray, 40)
+table.cell(dash, 0, 3, "RSI",     text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 3, rsiTxt,    text_color=color.white, text_size=size.small, bgcolor=rsiBg)
+
+// ─ Row 4: RVOL (상대 거래량)
+rvolTxt = str.tostring(math.round(rvol, 2)) + "x"
+rvolBg  = rvol > 2.0 ? color.new(color.blue, 10) : rvol > vol_mult ? color.new(color.blue, 30) : rvol < 0.6 ? color.new(color.orange, 30) : color.new(color.gray, 40)
+table.cell(dash, 0, 4, "RVOL",    text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 4, rvolTxt,   text_color=color.white, text_size=size.small, bgcolor=rvolBg)
+
+// ─ Row 5: Stochastic (매매 타이밍)
+stochTxt = stochOS ? "OVERSOLD" : stochOB ? "OVERBOUGHT" : str.tostring(math.round(stochK, 0)) + " / " + str.tostring(math.round(stochD, 0))
+stochBg  = stochOS ? color.new(color.lime, 20) : stochOB ? color.new(color.red, 20) : color.new(color.gray, 40)
+table.cell(dash, 0, 5, "Stoch",   text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 5, stochTxt,  text_color=color.white, text_size=size.small, bgcolor=stochBg)
+
+// ─ Row 6: MACD (모멘텀 방향)
+macdTxt = macdCrossUp ? "CROSS UP ▲" : macdCrossDown ? "CROSS DN ▼" : macdPositive ? "BULLISH" : macdNegative ? "BEARISH" : "FLAT"
+macdBg  = macdCrossUp ? color.new(color.lime, 10) : macdCrossDown ? color.new(color.red, 10) : macdPositive ? color.new(color.teal, 30) : macdNegative ? color.new(color.maroon, 30) : color.new(color.gray, 40)
+table.cell(dash, 0, 6, "MACD",    text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 6, macdTxt,   text_color=color.white, text_size=size.small, bgcolor=macdBg)
+
+// ─ Row 7: ADX (추세 강도)
+adxTxt = isStrongTrend ? "STRONG (" + str.tostring(math.round(adxVal, 0)) + ")" : isWeakTrend ? "WEAK (" + str.tostring(math.round(adxVal, 0)) + ")" : "MODERATE (" + str.tostring(math.round(adxVal, 0)) + ")"
+adxBg  = isStrongTrend ? color.new(color.blue, 20) : isWeakTrend ? color.new(color.orange, 30) : color.new(color.gray, 40)
+table.cell(dash, 0, 7, "ADX",     text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 7, adxTxt,    text_color=color.white, text_size=size.small, bgcolor=adxBg)
+
+// ─ Row 8: ATR 변동성 (리스크 참고)
+atrPct = (atrVal / close) * 100
+atrTxt = str.tostring(math.round(atrPct, 2)) + "%"
+atrBg  = atrPct > 4.0 ? color.new(color.red, 30) : atrPct > 2.0 ? color.new(color.orange, 30) : color.new(color.gray, 40)
+table.cell(dash, 0, 8, "ATR %",   text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 8, atrTxt,    text_color=color.white, text_size=size.small, bgcolor=atrBg)
+
+// ─ Row 9: BB Squeeze (변동성 수축 = 폭발 임박)
+sqzTxt = isSqueeze ? "SQUEEZE ⚡" : "NORMAL"
+sqzBg  = isSqueeze ? color.new(color.yellow, 10) : color.new(color.gray, 40)
+table.cell(dash, 0, 9, "BB Sqz",  text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 9, sqzTxt,    text_color=color.black, text_size=size.small, bgcolor=sqzBg)
+
+// ─ Row 10: 52주 범위 (연간 가격 위치)
+w52Txt = str.tostring(math.round(range52w, 0)) + "%"
+w52Lbl = range52w < 25 ? "52W LOW" : range52w > 75 ? "52W HIGH" : "52W MID"
+w52Bg  = range52w < 25 ? color.new(color.lime, 20) : range52w > 75 ? color.new(color.red, 20) : color.new(color.gray, 40)
+table.cell(dash, 0, 10, "52 Week", text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 10, w52Lbl + " (" + w52Txt + ")", text_color=color.white, text_size=size.small, bgcolor=w52Bg)
+
+// ─ Row 11: 가격 위치 (현재 가격이 최근 30봉 기준 어디에 있는지)
+posPct = math.round(rangePos * 100, 0)
+posTxt = str.tostring(posPct) + "%"
+posBg  = posPct < 25 ? color.new(color.lime, 20) : posPct > 75 ? color.new(color.red, 20) : color.new(color.gray, 40)
+posLbl = posPct < 25 ? "LOW Zone" : posPct > 75 ? "HIGH Zone" : "MID Zone"
+table.cell(dash, 0, 11, "Position", text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 11, posLbl + " (" + posTxt + ")", text_color=color.white, text_size=size.small, bgcolor=posBg)
+
+// ─ Row 12: ACCUM Score (매집 점수)
+buySig = buySignal ? "▲ BUY" : str.tostring(math.round(accumScore, 0)) + " / " + str.tostring(ACCUM_THRESHOLD)
+buyBg  = buySignal ? color.new(color.lime, 10) : nearBottom ? color.new(color.teal, 30) : color.new(color.gray, 50)
+table.cell(dash, 0, 12, "ACCUM",    text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 20))
+table.cell(dash, 1, 12, buySig,     text_color=color.white, text_size=size.small, bgcolor=buyBg)
+
+// ─ Row 13: SELL Score (매도 점수)
+sellSig = sellSignal ? "▼ SELL" : str.tostring(math.round(sellScore, 0)) + " / " + str.tostring(SELL_THRESHOLD)
+sellBg  = sellSignal ? color.new(color.red, 10) : color.new(color.gray, 50)
+table.cell(dash, 0, 13, "SELL",     text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 20))
+table.cell(dash, 1, 13, sellSig,    text_color=color.white, text_size=size.small, bgcolor=sellBg)
+
+// ============================================================
+// ─────────────── 15. ALERTS ─────────────────────────────────
+// ============================================================
+alertcondition(buySignal,  title="▲ BUY Signal",  message="ACCUMULATION BUY - Bottom Zone Entry. Ticker: {{ticker}} | Price: {{close}} | Time: {{time}}")
+alertcondition(sellSignal, title="▼ SELL Signal", message="INSTITUTIONAL SELL SIGNAL. Ticker: {{ticker}} | Price: {{close}} | Time: {{time}}")
+alertcondition(goldenCross, title="Golden Cross", message="GOLDEN CROSS detected. Ticker: {{ticker}} | Price: {{close}}")
+alertcondition(deathCross,  title="Death Cross",  message="DEATH CROSS detected. Ticker: {{ticker}} | Price: {{close}}")
