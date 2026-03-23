@@ -351,7 +351,7 @@ tp2Sell  = close - (slSell - close) * 3.0
 // ── EMAs ──────────────────────────────────────────────────
 plot(ema_fast_v, color=color.new(color.aqua, 30),  title="EMA 50",  linewidth=1)
 plot(ema_slow_v, color=color.new(color.orange, 0), title="EMA 200", linewidth=2)
-plot(vwapVal,    color=color.new(color.purple, 0), title="VWAP",    linewidth=2, style=plot.style_circles)
+plot(vwapVal,    color=color.new(color.purple, 0), title="VWAP",    linewidth=2)
 
 // ── BUY Signal: 초록 위쪽 화살표 ─────────────────────────────
 plotshape(buySignal,
@@ -373,94 +373,130 @@ plotshape(sellSignal,
           textcolor=color.black,
           size=size.huge)
 
-// ── 투자자 대시보드 테이블 (우상단) ───────────────────────────
-var table dash = table.new(position.top_right, 2, 14, bgcolor=color.new(color.black, 15), border_color=color.new(color.gray, 60), border_width=1, frame_color=color.gray, frame_width=1)
+// ── 통합 대시보드 테이블 (우상단) ────────────────────────────
+// : 상단 지표 요약 + 하단 골든 셋업 체크리스트 합본
+var table dash = table.new(position.top_right, 2, 24, bgcolor=color.new(color.black, 15), border_color=color.new(color.gray, 60), border_width=1, frame_color=color.gray, frame_width=1)
 
-// ─ Header
+// ════ 섹션 A: 지표 대시보드 ════
 table.cell(dash, 0, 0, "INDICATOR",  text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 10))
 table.cell(dash, 1, 0, "STATUS",     text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 10))
 
-// ─ Row 1: Trend (추세)
 trendTxt = isBullTrend ? "▲ BULL" : isBearTrend ? "▼ BEAR" : "— NEUTRAL"
 trendBg  = isBullTrend ? color.new(color.lime, 20) : isBearTrend ? color.new(color.red, 20) : color.new(color.gray, 40)
 table.cell(dash, 0, 1, "Trend",    text_color=color.white, text_size=size.small)
 table.cell(dash, 1, 1, trendTxt,   text_color=color.white, text_size=size.small, bgcolor=trendBg)
 
-// ─ Row 2: VWAP (기관 평균 매수가)
 vwapTxt = aboveVWAP ? "Above ▲" : "Below ▼"
 vwapBg  = aboveVWAP ? color.new(color.lime, 20) : color.new(color.red, 20)
 table.cell(dash, 0, 2, "VWAP",    text_color=color.white, text_size=size.small)
 table.cell(dash, 1, 2, vwapTxt + " $" + str.tostring(math.round(vwapVal, 2)), text_color=color.white, text_size=size.small, bgcolor=vwapBg)
 
-// ─ Row 3: RSI (과매수/과매도)
 rsiTxt = rsiVal < rsi_os ? "OVERSOLD" : rsiVal > rsi_ob ? "OVERBOUGHT" : str.tostring(math.round(rsiVal, 1))
 rsiBg  = rsiVal < rsi_os ? color.new(color.lime, 20) : rsiVal > rsi_ob ? color.new(color.red, 20) : rsiVal < 40 ? color.new(color.teal, 30) : rsiVal > 60 ? color.new(color.orange, 30) : color.new(color.gray, 40)
 table.cell(dash, 0, 3, "RSI",     text_color=color.white, text_size=size.small)
 table.cell(dash, 1, 3, rsiTxt,    text_color=color.white, text_size=size.small, bgcolor=rsiBg)
 
-// ─ Row 4: RVOL (상대 거래량)
 rvolTxt = str.tostring(math.round(rvol, 2)) + "x"
 rvolBg  = rvol > 2.0 ? color.new(color.blue, 10) : rvol > vol_mult ? color.new(color.blue, 30) : rvol < 0.6 ? color.new(color.orange, 30) : color.new(color.gray, 40)
 table.cell(dash, 0, 4, "RVOL",    text_color=color.white, text_size=size.small)
 table.cell(dash, 1, 4, rvolTxt,   text_color=color.white, text_size=size.small, bgcolor=rvolBg)
 
-// ─ Row 5: Stochastic (매매 타이밍)
 stochTxt = stochOS ? "OVERSOLD" : stochOB ? "OVERBOUGHT" : str.tostring(math.round(stochK, 0)) + " / " + str.tostring(math.round(stochD, 0))
 stochBg  = stochOS ? color.new(color.lime, 20) : stochOB ? color.new(color.red, 20) : color.new(color.gray, 40)
 table.cell(dash, 0, 5, "Stoch",   text_color=color.white, text_size=size.small)
 table.cell(dash, 1, 5, stochTxt,  text_color=color.white, text_size=size.small, bgcolor=stochBg)
 
-// ─ Row 6: MACD (모멘텀 방향)
 macdTxt = macdCrossUp ? "CROSS UP ▲" : macdCrossDown ? "CROSS DN ▼" : macdPositive ? "BULLISH" : macdNegative ? "BEARISH" : "FLAT"
 macdBg  = macdCrossUp ? color.new(color.lime, 10) : macdCrossDown ? color.new(color.red, 10) : macdPositive ? color.new(color.teal, 30) : macdNegative ? color.new(color.maroon, 30) : color.new(color.gray, 40)
 table.cell(dash, 0, 6, "MACD",    text_color=color.white, text_size=size.small)
 table.cell(dash, 1, 6, macdTxt,   text_color=color.white, text_size=size.small, bgcolor=macdBg)
 
-// ─ Row 7: ADX (추세 강도)
 adxTxt = isStrongTrend ? "STRONG (" + str.tostring(math.round(adxVal, 0)) + ")" : isWeakTrend ? "WEAK (" + str.tostring(math.round(adxVal, 0)) + ")" : "MODERATE (" + str.tostring(math.round(adxVal, 0)) + ")"
 adxBg  = isStrongTrend ? color.new(color.blue, 20) : isWeakTrend ? color.new(color.orange, 30) : color.new(color.gray, 40)
 table.cell(dash, 0, 7, "ADX",     text_color=color.white, text_size=size.small)
 table.cell(dash, 1, 7, adxTxt,    text_color=color.white, text_size=size.small, bgcolor=adxBg)
 
-// ─ Row 8: ATR 변동성 (리스크 참고)
 atrPct = (atrVal / close) * 100
 atrTxt = str.tostring(math.round(atrPct, 2)) + "%"
 atrBg  = atrPct > 4.0 ? color.new(color.red, 30) : atrPct > 2.0 ? color.new(color.orange, 30) : color.new(color.gray, 40)
 table.cell(dash, 0, 8, "ATR %",   text_color=color.white, text_size=size.small)
 table.cell(dash, 1, 8, atrTxt,    text_color=color.white, text_size=size.small, bgcolor=atrBg)
 
-// ─ Row 9: BB Squeeze (변동성 수축 = 폭발 임박)
 sqzTxt = isSqueeze ? "SQUEEZE ⚡" : "NORMAL"
 sqzBg  = isSqueeze ? color.new(color.yellow, 10) : color.new(color.gray, 40)
 table.cell(dash, 0, 9, "BB Sqz",  text_color=color.white, text_size=size.small)
 table.cell(dash, 1, 9, sqzTxt,    text_color=color.black, text_size=size.small, bgcolor=sqzBg)
 
-// ─ Row 10: 52주 범위 (연간 가격 위치)
 w52Txt = str.tostring(math.round(range52w, 0)) + "%"
 w52Lbl = range52w < 25 ? "52W LOW" : range52w > 75 ? "52W HIGH" : "52W MID"
 w52Bg  = range52w < 25 ? color.new(color.lime, 20) : range52w > 75 ? color.new(color.red, 20) : color.new(color.gray, 40)
 table.cell(dash, 0, 10, "52 Week", text_color=color.white, text_size=size.small)
 table.cell(dash, 1, 10, w52Lbl + " (" + w52Txt + ")", text_color=color.white, text_size=size.small, bgcolor=w52Bg)
 
-// ─ Row 11: 가격 위치 (현재 가격이 최근 30봉 기준 어디에 있는지)
 posPct = math.round(rangePos * 100, 0)
-posTxt = str.tostring(posPct) + "%"
 posBg  = posPct < 25 ? color.new(color.lime, 20) : posPct > 75 ? color.new(color.red, 20) : color.new(color.gray, 40)
 posLbl = posPct < 25 ? "LOW Zone" : posPct > 75 ? "HIGH Zone" : "MID Zone"
 table.cell(dash, 0, 11, "Position", text_color=color.white, text_size=size.small)
-table.cell(dash, 1, 11, posLbl + " (" + posTxt + ")", text_color=color.white, text_size=size.small, bgcolor=posBg)
+table.cell(dash, 1, 11, posLbl + " (" + str.tostring(posPct) + "%)", text_color=color.white, text_size=size.small, bgcolor=posBg)
 
-// ─ Row 12: ACCUM Score (매집 점수)
 buySig = buySignal ? "▲ BUY" : str.tostring(math.round(accumScore, 0)) + " / " + str.tostring(ACCUM_THRESHOLD)
 buyBg  = buySignal ? color.new(color.lime, 10) : nearBottom ? color.new(color.teal, 30) : color.new(color.gray, 50)
 table.cell(dash, 0, 12, "ACCUM",    text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 20))
 table.cell(dash, 1, 12, buySig,     text_color=color.white, text_size=size.small, bgcolor=buyBg)
 
-// ─ Row 13: SELL Score (매도 점수)
 sellSig = sellSignal ? "▼ SELL" : str.tostring(math.round(sellScore, 0)) + " / " + str.tostring(SELL_THRESHOLD)
 sellBg  = sellSignal ? color.new(color.red, 10) : color.new(color.gray, 50)
 table.cell(dash, 0, 13, "SELL",     text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 20))
 table.cell(dash, 1, 13, sellSig,    text_color=color.white, text_size=size.small, bgcolor=sellBg)
+
+
+// ════ 섹션 B: 골든 셋업 체크리스트 (dash 테이블 계속) ════
+c1 = belowVWAP
+c2 = rsiVal < 40
+c3 = isSqueeze
+c4 = rangePos < 0.25
+c5 = range52w < 30
+c6 = stochOS
+c7 = bullDiv
+c8 = volDryUp or (volClimax and nearBottom)
+
+hitCount = (c1 ? 1 : 0) + (c2 ? 1 : 0) + (c3 ? 1 : 0) + (c4 ? 1 : 0) + (c5 ? 1 : 0) + (c6 ? 1 : 0) + (c7 ? 1 : 0) + (c8 ? 1 : 0)
+headerBg  = hitCount >= 6 ? color.new(#FFD700, 5) : hitCount >= 4 ? color.new(color.teal, 20) : color.new(color.gray, 30)
+headerTxt = hitCount >= 6 ? "🏆 " + str.tostring(hitCount) + "/8 PRIME" : hitCount >= 4 ? "⭐ " + str.tostring(hitCount) + "/8 Watch" : str.tostring(hitCount) + "/8 Not Ready"
+
+// 구분선 겸 골든셋업 헤더 (row 14)
+table.cell(dash, 0, 14, "🏆 GOLDEN SETUP", text_color=color.black, text_size=size.small, bgcolor=headerBg)
+table.cell(dash, 1, 14, headerTxt,          text_color=color.black, text_size=size.small, bgcolor=headerBg)
+
+// 헬퍼 함수
+f_chk(cond, lbl) =>
+    [cond ? "✅ " + lbl : "❌ " + lbl, cond ? color.new(color.lime, 25) : color.new(color.gray, 55)]
+
+[l1, b1] = f_chk(c1, "VWAP Below")
+[l2, b2] = f_chk(c2, "RSI < 40")
+[l3, b3] = f_chk(c3, "BB Squeeze")
+[l4, b4] = f_chk(c4, "LOW Zone 25%")
+[l5, b5] = f_chk(c5, "52W Low 30%")
+[l6, b6] = f_chk(c6, "Stoch Oversold")
+[l7, b7] = f_chk(c7, "Bullish Div")
+[l8, b8] = f_chk(c8, "Vol Dry/Climax")
+
+table.cell(dash, 0, 15, l1, text_color=color.white, text_size=size.small, bgcolor=b1)
+table.cell(dash, 1, 15, "",  text_color=color.white, text_size=size.small, bgcolor=b1)
+table.cell(dash, 0, 16, l2, text_color=color.white, text_size=size.small, bgcolor=b2)
+table.cell(dash, 1, 16, "",  text_color=color.white, text_size=size.small, bgcolor=b2)
+table.cell(dash, 0, 17, l3, text_color=color.white, text_size=size.small, bgcolor=b3)
+table.cell(dash, 1, 17, "",  text_color=color.white, text_size=size.small, bgcolor=b3)
+table.cell(dash, 0, 18, l4, text_color=color.white, text_size=size.small, bgcolor=b4)
+table.cell(dash, 1, 18, "",  text_color=color.white, text_size=size.small, bgcolor=b4)
+table.cell(dash, 0, 19, l5, text_color=color.white, text_size=size.small, bgcolor=b5)
+table.cell(dash, 1, 19, "",  text_color=color.white, text_size=size.small, bgcolor=b5)
+table.cell(dash, 0, 20, l6, text_color=color.white, text_size=size.small, bgcolor=b6)
+table.cell(dash, 1, 20, "",  text_color=color.white, text_size=size.small, bgcolor=b6)
+table.cell(dash, 0, 21, l7, text_color=color.white, text_size=size.small, bgcolor=b7)
+table.cell(dash, 1, 21, "",  text_color=color.white, text_size=size.small, bgcolor=b7)
+table.cell(dash, 0, 22, l8, text_color=color.white, text_size=size.small, bgcolor=b8)
+table.cell(dash, 1, 22, "",  text_color=color.white, text_size=size.small, bgcolor=b8)
 
 // ============================================================
 // ─────────────── 15. ALERTS ─────────────────────────────────
