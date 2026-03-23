@@ -1,10 +1,11 @@
 // ============================================================
-// INSTITUTIONAL GOLDEN ENTRY v3.0
-// Smart Money Concept + Wyckoff + Volume Delta + RSI Divergence
-// Designed for: Low-Risk Bottom Accumulation & Trend Exits
+// INSTITUTIONAL GOLDEN ENTRY v5.0
+// Full Screening Metrics + SMC + Wyckoff + Volume Delta
+// + Dividend Value + Multi-Factor Scoring
+// Designed for: Low-Risk Bottom Accumulation & Trend Top Exits
 // ============================================================
 //@version=5
-indicator("Institutional Buy & Sell [SMC + Wyckoff]", overlay=true, max_bars_back=500)
+indicator("Institutional Buy & Sell v5", overlay=true, max_bars_back=500)
 
 // ============================================================
 // ─────────────────── USER INPUTS ────────────────────────────
@@ -29,14 +30,17 @@ show_sell  = input.bool(true, "Show SELL signals", group=grp4)
 show_zones = input.bool(true, "Show Support/Resistance Zones", group=grp4)
 show_sl_tp = input.bool(true, "Show Stop Loss / Take Profit", group=grp4)
 
+grp5 = "🛡️ Trailing Stop"
+trailAtrMult = input.float(3.0, "Trailing Stop ATR Multiplier", step=0.1, group=grp5, minval=1.0, maxval=5.0)
+
 // ============================================================
 // ─────────────── 1. MULTI-TIMEFRAME TREND ───────────────────
 // ============================================================
-// Higher timeframe EMA for context (Weekly)
-ema_fast_v   = ta.ema(close, ema_fast)
-ema_slow_v   = ta.ema(close, ema_slow)
+ema20_v      = ta.ema(close, 20)
+ema_fast_v   = ta.ema(close, ema_fast)   // EMA50
+ema_slow_v   = ta.ema(close, ema_slow)   // EMA200
 
-// Weekly trend confirmation via security call
+// Weekly trend confirmation
 weeklyClose  = request.security(syminfo.tickerid, "W", close, lookahead=barmerge.lookahead_off)
 weeklyEma50  = request.security(syminfo.tickerid, "W", ta.ema(close, 50), lookahead=barmerge.lookahead_off)
 weeklyAbove  = not useWeeklyTrend or (weeklyClose > weeklyEma50)
@@ -45,9 +49,22 @@ weeklyAbove  = not useWeeklyTrend or (weeklyClose > weeklyEma50)
 isBullTrend  = ema_fast_v > ema_slow_v and close > ema_slow_v
 isBearTrend  = ema_fast_v < ema_slow_v and close < ema_slow_v
 
-// Golden / Death Cross detection
+// Golden / Death Cross
 goldenCross  = ta.crossover(ema_fast_v, ema_slow_v)
 deathCross   = ta.crossunder(ema_fast_v, ema_slow_v)
+
+// ── EMA 갭 (추세 지표 표에서) ──────────────────────────────
+ema20_50gap  = (ema20_v - ema_fast_v) / ema_fast_v * 100    // EMA20-50갭
+ema50_200gap = (ema_fast_v - ema_slow_v) / ema_slow_v * 100 // EMA50-200갭
+
+// EMA200 기울기(20일): 추세 방향 변화 감지
+ema200_slope20 = (ema_slow_v / ema_slow_v[20] - 1) * 100    // % 변화
+ema200_rising  = ema200_slope20 > 0
+ema200_falling = ema200_slope20 < -1
+
+// EMA50 기울기 (칼날잡기 방지)
+ema50_slope      = ema_fast_v - ema_fast_v[5]
+ema50_flattening = ema50_slope > -(ema_fast_v * 0.005)
 
 // ============================================================
 // ─────────────── 1b. VWAP (기관 평균 매수가) ────────────────
@@ -61,7 +78,7 @@ belowVWAP    = close < vwapVal
 // ============================================================
 high52w      = request.security(syminfo.tickerid, "W", ta.highest(high, 52), lookahead=barmerge.lookahead_off)
 low52w       = request.security(syminfo.tickerid, "W", ta.lowest(low, 52),   lookahead=barmerge.lookahead_off)
-range52w     = (close - low52w) / math.max(high52w - low52w, 0.01) * 100  // 0%=52주 저점, 100%=52주 고점
+range52w     = (close - low52w) / math.max(high52w - low52w, 0.01) * 100
 
 // ============================================================
 // ─────────────── 1d. ADX (추세 강도) ────────────────────────
@@ -81,36 +98,138 @@ bbUpper      = bbBasis + bbDev
 bbLower      = bbBasis - bbDev
 bbWidth      = (bbUpper - bbLower) / bbBasis
 bbWidthMin   = ta.lowest(bbWidth, 50)
-isSqueeze    = bbWidth <= bbWidthMin * 1.05  // BB 폭이 50봉 최저 근처 = 스퀴즈
+isSqueeze    = bbWidth <= bbWidthMin * 1.05
+bbUpperTouch = close > bbUpper
+
+// 볼린저 P밴드 (%B): 가격이 밴드 내 어디에 있는지 (0=하단, 1=상단)
+bbPctB       = (close - bbLower) / math.max(bbUpper - bbLower, 0.01)
+
+// ============================================================
+// ─────────────── 1f. EMA200 이격도 (과열 감지) ───────────────
+// ============================================================
+ema200_dist    = (close - ema_slow_v) / ema_slow_v * 100
+overextended   = ema200_dist > 30   // EMA200 대비 30% 이상 = 과열
+
+// ============================================================
+// ─────────────── 1g. OBV (세력 매집 감지) ────────────────────
+// ============================================================
+obvVal     = ta.obv
+obvEma     = ta.ema(obvVal, 20)
+obvRising  = obvVal > obvEma  // OBV가 EMA 위 = 매집 진행 중
+
+// ============================================================
+// ─────────────── 1h. CMF (자금 유입/유출) ────────────────────
+// ============================================================
+mfm   = ((close - low) - (high - close)) / math.max(high - low, 0.001)
+mfv   = mfm * volume
+cmf20 = ta.sma(mfv, 20) / ta.sma(volume, 20)
+moneyInflow = cmf20 > 0  // 양수 = 자금 유입
+
+// ============================================================
+// ─────────────── 1i. Parabolic SAR (트레일링 스탑) ───────────
+// ============================================================
+sarVal     = ta.sar(0.02, 0.02, 0.2)
+sarBearish = close < sarVal  // SAR 아래로 이탈 = 매도 신호
+
+// ============================================================
+// ─────────────── 1j. 배당 가치 (Dividend Value) ──────────────
+// ============================================================
+// request.dividends()로 주당 배당금(DPS) 가져옴
+dpsVal      = request.dividends(syminfo.tickerid, dividends.net, barmerge.gaps_off)
+divYield    = close > 0 and dpsVal > 0 ? (dpsVal / close) * 100 : na  // 배당 수익률 직접 계산
+yieldAvg    = ta.sma(nz(divYield), 250) // 1년 평균 배당 수익률
+
+// EPS로 배당 성향 직접 계산 (EPS는 health check에서 쓰므로 여기서 미리 가져옴)
+epsForPayout = request.financial(syminfo.tickerid, "EARNINGS_PER_SHARE", "TTM", ignore_invalid_symbol=true)
+payoutRatio  = (not na(epsForPayout) and epsForPayout > 0 and not na(dpsVal)) ? (dpsVal / epsForPayout) * 100 : na
+
+// 가치 판단: 현재 수익률이 역사적 평균보다 25% 이상 높을 때 (주가가 저평가)
+isHighYield = not na(divYield) and divYield > nz(yieldAvg, 0) * 1.25
+// 배당 함정: 벌어들이는 돈보다 배당을 더 많이 주면 위험 (100% 초과)
+isDivTrap   = not na(payoutRatio) and payoutRatio > 100.0
+
+// ============================================================
+// ─────────────── 1j-2. 기업 건강 체크 (Fundamental Health) ───
+// ── 목적: "싸지만 죽어가는 기업" 걸러내기 ────────────────────
+// ============================================================
+// EPS (주당순이익): 돈을 벌고 있는가? (epsForPayout은 배당 섹션에서 이미 가져옴)
+epsVal      = epsForPayout
+epsOk       = na(epsVal) ? true : epsVal > 0
+
+// Debt-to-Equity (부채비율): 빚이 감당 가능한가?
+debtEquity  = request.financial(syminfo.tickerid, "DEBT_TO_EQUITY", "FQ", ignore_invalid_symbol=true)
+debtOk      = na(debtEquity) ? true : debtEquity < 300  // D/E < 300% (데이터 없으면 통과)
+
+// Free Cash Flow (잉여현금흐름): 현금을 태우고 있진 않은가?
+fcfVal      = request.financial(syminfo.tickerid, "FREE_CASH_FLOW", "TTM", ignore_invalid_symbol=true)
+fcfOk       = na(fcfVal) ? true : fcfVal > 0  // FCF > 0 = 현금 창출 중
+
+// Current Ratio (유동비율): 단기 부채를 갚을 수 있는가?
+currentRat  = request.financial(syminfo.tickerid, "CURRENT_RATIO", "FQ", ignore_invalid_symbol=true)
+currentOk   = na(currentRat) ? true : currentRat > 0.8  // 유동비율 > 0.8
+
+// 건강 점수 (0~4, 높을수록 건강)
+healthScore = (epsOk ? 1 : 0) + (debtOk ? 1 : 0) + (fcfOk ? 1 : 0) + (currentOk ? 1 : 0)
+
+// 좀비 기업: 4개 중 2개 이상 실패 → BUY 차단
+isZombie    = healthScore <= 1
+
+// ============================================================
+// ─────────────── 1k. 스크리닝 추가 지표 ─────────────────────
+// ============================================================
+volSma       = ta.sma(volume, vol_len)  // 거래량 MA (여러 섹션에서 공유)
+
+// 거래량Z(20): (거래량 – MA20) / 표준편차 → 거래량 이상치 탐지
+volStdev20   = ta.stdev(volume, 20)
+volZ20       = volStdev20 > 0 ? (volume - volSma) / volStdev20 : 0
+
+// 거래대금안정비: 20일 거래대금 / 60일 거래대금 → 안정적 유동성 확인
+tradeval     = close * volume
+tradeval20   = ta.sma(tradeval, 20)
+tradeval60   = ta.sma(tradeval, 60)
+tvStability  = tradeval60 > 0 ? tradeval20 / tradeval60 : 1.0
+
+// OBV Z20: OBV를 20일 Z-score로 정규화
+obvSma20     = ta.sma(obvVal, 20)
+obvStdev20   = ta.stdev(obvVal, 20)
+obvZ20       = obvStdev20 > 0 ? (obvVal - obvSma20) / obvStdev20 : 0
+
+// A/D 기울기(5): 누적 분배 지수 5일 변화율
+adLine       = ta.cum(mfm * volume)
+adSlope5     = adLine - adLine[5]
+
+// ROC(10): 10일 가격 변화율
+roc10        = ta.roc(close, 10)
+
+// 10일 저점·고점 괴리
+low10d       = ta.lowest(low, 10)
+high10d      = ta.highest(high, 10)
+distLow10    = low10d  > 0 ? (close / low10d  - 1) * 100 : 0  // 저점 대비 %
+distHigh10   = high10d > 0 ? (close / high10d - 1) * 100 : 0  // 고점 대비 % (음수)
 
 // ============================================================
 // ─────────────── 2. WYCKOFF ACCUMULATION ZONE ───────────────
 // ============================================================
-// Identify potential Wyckoff Spring: price dips below recent low then recovers
 lookback     = 20
 swingLow     = ta.lowest(low, lookback)
 swingHigh    = ta.highest(high, lookback)
 
-// Spring: Shakeout below accumulated range
 isSpring     = low < swingLow[1] and close > swingLow[1]
 
-// Sign of Strength: Strong close after spring with range expansion
 rangeSize    = high - low
 bodySize     = math.abs(close - open)
 isStrengthBar = close > open and bodySize > rangeSize * 0.55
 
-// Wyckoff Accumulation: price near structural support in a sideways range
 rangeHigh    = ta.highest(high, 40)
 rangeLow     = ta.lowest(low, 40)
 rangeWidth   = rangeHigh - rangeLow
-inAccumZone  = (close - rangeLow) / math.max(rangeWidth, 0.01) < 0.35  // bottom 35% of range
+inAccumZone  = (close - rangeLow) / math.max(rangeWidth, 0.01) < 0.35
 
 // ============================================================
 // ─────────────── 3. RSI DIVERGENCE DETECTION ────────────────
 // ============================================================
 rsiVal       = ta.rsi(close, rsi_len)
 
-// Bullish Divergence: price makes lower low, RSI makes higher low
 priceLow1    = ta.lowest(low, 5)
 priceLow2    = ta.lowest(low[5], 5)
 rsiLow1      = ta.lowest(rsiVal, 5)
@@ -118,7 +237,6 @@ rsiLow2      = ta.lowest(rsiVal[5], 5)
 
 bullDiv      = priceLow1 < priceLow2 and rsiLow1 > rsiLow2 and rsiVal < 50
 
-// Bearish Divergence: price makes higher high, RSI makes lower high
 priceHigh1   = ta.highest(high, 5)
 priceHigh2   = ta.highest(high[5], 5)
 rsiHigh1     = ta.highest(rsiVal, 5)
@@ -129,52 +247,40 @@ bearDiv      = priceHigh1 > priceHigh2 and rsiHigh1 < rsiHigh2 and rsiVal > 50
 // ============================================================
 // ─────────────── 4. VOLUME ANALYSIS (SMART MONEY) ───────────
 // ============================================================
-volSma       = ta.sma(volume, vol_len)
+// volSma already defined in section 1k
 rvol         = volume / volSma
 
-// High-volume breakout (smart money entering)
 isHighVol    = rvol > vol_mult
+volClimax    = rvol > 2.5 and close < open
+volDryUp     = rvol < 0.6
 
-// Volume climax top: extreme volume at high price = distribution
-volClimax    = rvol > 2.5 and close < open  // big red candle on massive volume = selling climax potential BUY countertrend
-                                             // OR distribution if at highs
-
-// Volume dry-up = smart money absorbed all selling, ready to move
-volDryUp     = rvol < 0.6  // very quiet volume = no sellers left
-
-// Average volume in last 3 bars before signal
 avgRecentVol = (volume + volume[1] + volume[2]) / 3
-volPickup    = volume > avgRecentVol * 1.2  // volume building up
+volPickup    = volume > avgRecentVol * 1.2
+
+// 거래량 감소 중 상승 = 약세 상승 (천장 임박)
+volDecliningRally = close > close[3] and volume < volume[3] and volume[1] < volume[2] and rsiVal > 60
 
 // ============================================================
 // ─────────────── 5. SMART MONEY CONCEPT (SMC) ───────────────
-// ─── Order Blocks + Break of Structure ──────────────────────
 // ============================================================
-// Bearish Order Block: last significant down-candle before a down-move reversal
-// (institutions sell here, we look for reaction)
 bullOB_high  = ta.highest(high[1], 3)
 bullOB_low   = ta.lowest(low[1], 3)
 
-// Break of Structure (BOS) - Bullish: price closes above recent swing high
 bos_high     = ta.highest(high, 10)
-bosBreakUp   = close > bos_high[1]  // Break of structure to the upside
+bosBreakUp   = close > bos_high[1]
 
-// Change of Character (CHoCH): first sign of trend reversal
-// Bearish structure: series of lower highs → now breaks one
 prevHighs    = ta.highest(high, 15)
-choch_bull   = close > prevHighs[1] and isBearTrend[1]  // breaking bearish structure
+choch_bull   = close > prevHighs[1] and isBearTrend[1]
 
 // ============================================================
 // ─────────────── 6. MOMENTUM CONFIRMATION ───────────────────
 // ============================================================
-// MACD for momentum confirmation
 [macdLine, signalLine, histLine] = ta.macd(close, 12, 26, 9)
 macdCrossUp   = ta.crossover(macdLine, signalLine)
 macdCrossDown = ta.crossunder(macdLine, signalLine)
 macdPositive  = macdLine > signalLine and macdLine > 0
 macdNegative  = macdLine < signalLine and macdLine < 0
 
-// Stochastic for oversold/overbought
 stochK = ta.sma(ta.stoch(close, high, low, 14), 3)
 stochD = ta.sma(stochK, 3)
 stochOS = stochK < 20 and stochD < 20
@@ -185,38 +291,36 @@ stochCrossDown = ta.crossunder(stochK, stochD) and stochK > 70
 // ============================================================
 // ─────────────── 7. CANDLE PATTERN RECOGNITION ──────────────
 // ============================================================
-// Bullish Engulfing
 bullEngulf   = close > open and close[1] < open[1] and 
                close > open[1] and open < close[1]
 
-// Hammer / Pin Bar (shakeout candle)
 lowerWick    = open > close ? (close - low) : (open - low)
 upperWick    = open > close ? (high - open) : (high - close)
 hammerBody   = math.abs(close - open)
 isHammer     = lowerWick > hammerBody * 2 and upperWick < hammerBody * 0.5 and 
                lowerWick > (high - low) * 0.55
 
-// Bullish Harami
 bullHarami   = close[1] < open[1] and close > open and
                close < open[1] and open > close[1]
 
-// Morning Star (3-candle reversal)
-mornStar     = close[2] < open[2] and                                  // first: bearish
-               math.abs(close[1] - open[1]) < (high[1] - low[1]) * 0.3 and  // second: doji/small
-               close > open and close > (open[2] + close[2]) / 2       // third: bullish engulf
+mornStar     = close[2] < open[2] and
+               math.abs(close[1] - open[1]) < (high[1] - low[1]) * 0.3 and
+               close > open and close > (open[2] + close[2]) / 2
 
-// Bearish Engulfing
 bearEngulf   = close < open and close[1] > open[1] and
                close < open[1] and open > close[1]
 
-// Shooting Star
 isShootingStar = upperWick > hammerBody * 2 and lowerWick < hammerBody * 0.5 and
                  upperWick > (high - low) * 0.55 and close < open
+
+// Evening Star (3봉 천장 반전 패턴)
+eveningStar  = close[2] > open[2] and
+               math.abs(close[1] - open[1]) < (high[1] - low[1]) * 0.3 and
+               close < open and close < (open[2] + close[2]) / 2
 
 // ============================================================
 // ─────────────── 8. SUPPORT / RESISTANCE ZONES ──────────────
 // ============================================================
-// Pivot-based S/R
 pivotHigh    = ta.pivothigh(high, 5, 5)
 pivotLow     = ta.pivotlow(low, 5, 5)
 
@@ -225,102 +329,190 @@ pivotLow     = ta.pivotlow(low, 5, 5)
 // ── 핵심 철학: 가격이 저점 근처에 있을 때만 BUY 발동 ──────────
 // ============================================================
 
-// [ GATE 조건 ] 최근 30봉 중 하위 30% 구간에 있어야 함 (매집 구간 필터)
+// [ GATE 조건 ] 다중 범위 바닥 감지 (30봉 / 60봉 / 120봉)
 recentHigh30 = ta.highest(high, 30)
 recentLow30  = ta.lowest(low, 30)
 rangePos     = (close - recentLow30) / math.max(recentHigh30 - recentLow30, 0.01)
-nearBottom   = rangePos < 0.30  // 저점 근처 30% 이내
 
-// [ GATE 조건 ] RSI가 50 미만 (아직 오버바트 아님)
+recentHigh60  = ta.highest(high, 60)
+recentLow60   = ta.lowest(low, 60)
+rangePos60    = (close - recentLow60) / math.max(recentHigh60 - recentLow60, 0.01)
+
+recentHigh120 = ta.highest(high, 120)
+recentLow120  = ta.lowest(low, 120)
+rangePos120   = (close - recentLow120) / math.max(recentHigh120 - recentLow120, 0.01)
+
+// 30봉 OR 60봉 기준 하위 35%에 있어야 함
+nearBottom   = rangePos < 0.35 or rangePos60 < 0.30
+
+// [ GATE 조건 ] RSI가 50 미만
 rsiGate      = rsiVal < 50
 
-// 매집 스코어 (GATE 조건 통과 시 세부 점수 합산)
+// 매집 스코어
 accumScore = 0.0
 
-// ─ 저점 깊이 (얼마나 바닥에 가까운지)
+// ─ 저점 깊이
 accumScore := accumScore + (rangePos < 0.15 ? 20 : rangePos < 0.25 ? 12 : 0)
+accumScore := accumScore + (rangePos120 < 0.20 ? 10 : 0)  // 장기적으로도 바닥 근처
 
 // ─ RSI 과매도 강도
 accumScore := accumScore + (rsiVal < rsi_os ? 20 : rsiVal < rsi_os + 10 ? 10 : 0)
 
-// ─ 불리시 다이버전스 (가장 신뢰성 높은 반전 신호)
-accumScore := accumScore + (bullDiv ? 25 : 0)
+// ─ 불리시 다이버전스 (최고 신뢰 반전 신호)
+accumScore := accumScore + (bullDiv ? 30 : 0)
 
-// ─ Wyckoff Spring (가격이 저점 아래로 찔렸다가 회복)
+// ─ Wyckoff Spring
 accumScore := accumScore + (isSpring ? 20 : 0)
 
 // ─ 거래량 패턴
-accumScore := accumScore + (volClimax ? 15 : 0)       // 매도 폭발 후 하락 = 세력 매집 가능
-accumScore := accumScore + (volDryUp ? 10 : 0)         // 거래량 소멸 = 매도세 소진
-accumScore := accumScore + (isHighVol and close > open ? 15 : 0)  // 고거래량 양봉 = 세력 진입
+accumScore := accumScore + (volClimax ? 15 : 0)
+accumScore := accumScore + (volDryUp ? 10 : 0)
+accumScore := accumScore + (isHighVol and close > open ? 15 : 0)
+
+// ─ OBV 매집 확인 (세력 조용히 매집 중)
+accumScore := accumScore + (obvRising ? 15 : 0)
+
+// ─ OBV Z20 급등 (매집 이상치 감지)
+accumScore := accumScore + (obvZ20 > 1.5 ? 12 : 0)
+
+// ─ CMF 자금 유입
+accumScore := accumScore + (moneyInflow ? 12 : 0)
+
+// ─ A/D 기울기 양전환 (자금 유입 가속)
+accumScore := accumScore + (adSlope5 > 0 and nearBottom ? 10 : 0)
 
 // ─ 캔들 반전 패턴
-accumScore := accumScore + (mornStar ? 25 : 0)         // 모닝스타 (최강 반전)
-accumScore := accumScore + (isHammer ? 20 : 0)         // 망치형 (꼬리 긺 = 매수세)
-accumScore := accumScore + (bullEngulf ? 15 : 0)       // 상승 장악
-accumScore := accumScore + (bullHarami ? 8  : 0)       // 배내 패턴
+accumScore := accumScore + (mornStar ? 25 : 0)
+accumScore := accumScore + (isHammer ? 20 : 0)
+accumScore := accumScore + (bullEngulf ? 15 : 0)
+accumScore := accumScore + (bullHarami ? 8  : 0)
 
 // ─ 모멘텀 반전
-accumScore := accumScore + (stochCrossUp ? 15 : 0)    // 스토캐스틱 골든크로스 (과매도에서)
-accumScore := accumScore + (macdCrossUp ? 10 : 0)     // MACD 반전
+accumScore := accumScore + (stochCrossUp ? 15 : 0)
+accumScore := accumScore + (macdCrossUp ? 10 : 0)
 
 // ─ SMC / 구조 반전
-accumScore := accumScore + (choch_bull ? 12 : 0)      // 베어 구조에서 첫 고점 돌파
+accumScore := accumScore + (choch_bull ? 12 : 0)
 
-// ─ VWAP (기관 평균가보다 싸게 매수)
+// ─ VWAP (기관 평균가보다 싸게)
 accumScore := accumScore + (belowVWAP ? 10 : 0)
 
-// ─ BB Squeeze (변동성 수축 → 곧 폭발)
-accumScore := accumScore + (isSqueeze ? 12 : 0)
+// ─ 볼린저 %B 저점 (밴드 하단 20% 이내)
+accumScore := accumScore + (bbPctB < 0.2 ? 12 : isSqueeze ? 8 : 0)
+
+// ─ EMA200 기울기 반전 (하락→평탄/상승 전환)
+accumScore := accumScore + (ema200_slope20 > -0.5 and ema200_slope20[5] < -1 ? 12 : 0)
+
+// ─ EMA50 기울기 평탄화 (추세 전환 조짐)
+accumScore := accumScore + (ema50_flattening ? 10 : 0)
+
+// ─ 10일 저점 근처 (저점 대비 2% 이내)
+accumScore := accumScore + (distLow10 < 2 ? 8 : 0)
+
+// ─ Weekly 트렌드 위 (장기 방향 일치)
+accumScore := accumScore + (weeklyAbove ? 10 : 0)
+
+// ─ 가치 점수: 배당 수익률 매력 (저점 메리트)
+accumScore := accumScore + (isHighYield ? 15 : 0)
+
+// ─ 배당 함정 패널티 (배당이 지속 불가능할 때 감점)
+accumScore := accumScore + (isDivTrap ? -25 : 0)
+
+// ─ 좀비 기업 패널티 (기업 건강 매우 위험)
+accumScore := accumScore + (isZombie ? -30 : 0)
 
 // ============================================================
 // ─────────────── 10. SELL SIGNAL LOGIC ──────────────────────
 // ============================================================
 sellScore = 0.0
 
-// 추세 완전 붕괴
+// ─ 추세 완전 붕괴
 sellScore := sellScore + (isBearTrend ? 20 : 0)
 sellScore := sellScore + (deathCross ? 15 : 0)
 
-// 과매수 구간
+// ─ 과매수 구간
 sellScore := sellScore + (rsiVal > rsi_ob - 5 ? 10 : 0)
 sellScore := sellScore + (bearDiv ? 20 : 0)
 sellScore := sellScore + (stochCrossDown ? 12 : 0)
 sellScore := sellScore + (macdCrossDown ? 12 : 0)
 
-// 분산 / 고점에서 고거래량 하락
+// ─ 분산 / 고거래량 하락
 sellScore := sellScore + (volClimax and rsiVal > 60 ? 20 : 0)
 sellScore := sellScore + (isHighVol and close < open and rsiVal > 65 ? 15 : 0)
 
-// VWAP 붕괴 (가격이 기관 평균 매수가 아래로)
+// ─ VWAP 붕괴
 sellScore := sellScore + (belowVWAP and rsiVal > 50 ? 8 : 0)
 
-// 고점 근처 (상위 25% 이상) + 베어리시 캔들
+// ─ 고점 근처 베어리시 캔들
 recentHighPos = (close - recentLow30) / math.max(recentHigh30 - recentLow30, 0.01) > 0.70
 sellScore := sellScore + (recentHighPos and bearEngulf ? 20 : 0)
 sellScore := sellScore + (recentHighPos and isShootingStar ? 15 : 0)
+sellScore := sellScore + (recentHighPos and eveningStar ? 18 : 0)
 
-// 구조 붕괴
+// ─ 구조 붕괴
 sellScore := sellScore + (close < ta.lowest(low[1], 10) ? 10 : 0)
+
+// ──── 신규 SELL 지표 ────
+
+// ─ EMA200 이격도 과열
+sellScore := sellScore + (overextended ? 20 : 0)
+
+// ─ 52주 고점 근처 (상위 85% 이상)
+near52wHigh = range52w > 85
+sellScore := sellScore + (near52wHigh ? 15 : 0)
+
+// ─ BB 상단 돌파 + RSI > 70
+sellScore := sellScore + (bbUpperTouch and rsiVal > 70 ? 15 : 0)
+
+// ─ Parabolic SAR 이탈
+sellScore := sellScore + (sarBearish ? 15 : 0)
+
+// ─ 이중 과매수 (RSI + Stochastic 동시)
+dualOverbought = rsiVal > 70 and stochOB
+sellScore := sellScore + (dualOverbought ? 20 : 0)
+
+// ─ 거래량 감소 추세 중 상승 (약세 랠리 = 천장 임박)
+sellScore := sellScore + (volDecliningRally ? 12 : 0)
+
+// ─ 볼린저 %B 고점 (밴드 상단 80% 이상 + 과매수)
+sellScore := sellScore + (bbPctB > 0.9 and rsiVal > 65 ? 12 : 0)
+
+// ─ 10일 고점 근처 (고점 대비 1% 이내) + 약세 신호
+sellScore := sellScore + (distHigh10 > -1 and bearDiv ? 10 : 0)
+
+// ─ ROC(10) 과열 (10일간 15% 이상 급등)
+sellScore := sellScore + (roc10 > 15 ? 12 : 0)
+
+// ─ OBV Z20 급락 (세력 매도 이상치)
+sellScore := sellScore + (obvZ20 < -1.5 and rsiVal > 50 ? 12 : 0)
+
+// ─ A/D 기울기 음전환 (고점에서 자금 유출)
+sellScore := sellScore + (adSlope5 < 0 and recentHighPos ? 10 : 0)
+
+// ─ EMA20 < EMA50 (단기 추세 붕괴)
+sellScore := sellScore + (ema20_50gap < -2 ? 10 : 0)
 
 // ============================================================
 // ─────────────── 11. FINAL SIGNAL GENERATION ────────────────
 // ============================================================
-// [ BUY ] GATE 조건 필수 + 스코어 임계값
-ACCUM_THRESHOLD = 45  // 45점 이상 + 저점 근처 + RSI<50 → BUY
-SELL_THRESHOLD  = 50
+ACCUM_THRESHOLD = 45
+SELL_THRESHOLD  = 60  // 60점 이상만 SELL (높을수록 확실한 신호만)
 
-// GATE: 반드시 저점 근처 + RSI<50를 통과해야 BUY 발동
-accumGate = nearBottom and rsiGate
+// GATE: 반드시 저점 근처 + RSI<50 + EMA 평탄화 통과해야 BUY 발동
+// 예외: 극단적 과매도(RSI<25 + 120봉 바닥 20% + 52주 저점 15%)면 EMA 게이트 면제
+var int lastBuyBar  = -20
+var int lastSellBar = -20
+
+extremeOversold      = rsiVal < 25 and rangePos120 < 0.20 and range52w < 15
+buyCooldownAfterSell = bar_index - lastSellBar >= 10
+accumGate = nearBottom and rsiGate and (ema50_flattening or extremeOversold) and buyCooldownAfterSell and (not isZombie)
 
 buySignalRaw  = accumGate and accumScore >= ACCUM_THRESHOLD and show_buy
 anySell       = sellScore >= SELL_THRESHOLD and show_sell
 
-// 신호 중복 방지: BUY 5봉, SELL 5봉 이내 재발동 금지
-var int lastBuyBar  = -10
-var int lastSellBar = -10
-buySignal  = buySignalRaw  and (bar_index - lastBuyBar  >= 5)
-sellSignal = anySell       and (bar_index - lastSellBar >= 5)
+// 신호 중복 방지: BUY 15봉, SELL 20봉 이내 재발동 금지
+buySignal  = buySignalRaw  and (bar_index - lastBuyBar  >= 15)
+sellSignal = anySell       and (bar_index - lastSellBar >= 20)
 
 if buySignal
     lastBuyBar := bar_index
@@ -330,19 +522,19 @@ if sellSignal
 // ============================================================
 // ─────────────── 12. STOP LOSS / TAKE PROFIT ────────────────
 // ============================================================
-// ATR-based dynamic SL/TP (institutional standard)
 atrLen   = 14
 atrVal   = ta.atr(atrLen)
 
-// For buy signals: SL below recent swing low, TP at 2:1 and 3:1 R:R
 slBuy    = ta.lowest(low, 5) - atrVal * 0.5
-tp1Buy   = close + (close - slBuy) * 2.0   // 2R target
-tp2Buy   = close + (close - slBuy) * 3.0   // 3R target
+tp1Buy   = close + (close - slBuy) * 2.0
+tp2Buy   = close + (close - slBuy) * 3.0
 
-// For sell signals
 slSell   = ta.highest(high, 5) + atrVal * 0.5
 tp1Sell  = close - (slSell - close) * 2.0
 tp2Sell  = close - (slSell - close) * 3.0
+
+// ATR 기반 트레일링 스탑
+trailStop = ta.highest(high, 10) - atrVal * trailAtrMult
 
 // ============================================================
 // ─────────────── 13. VISUALIZATION ─────────────────────────
@@ -353,7 +545,7 @@ plot(ema_fast_v, color=color.new(color.aqua, 30),  title="EMA 50",  linewidth=1)
 plot(ema_slow_v, color=color.new(color.orange, 0), title="EMA 200", linewidth=2)
 plot(vwapVal,    color=color.new(color.purple, 0), title="VWAP",    linewidth=2)
 
-// ── BUY Signal: 초록 위쪽 화살표 ─────────────────────────────
+// ── BUY Signal ─────────────────────────────────────────────
 plotshape(buySignal,
           title="BUY",
           text="BUY",
@@ -363,7 +555,7 @@ plotshape(buySignal,
           textcolor=color.black,
           size=size.huge)
 
-// ── SELL Signal: 빨간 아래쪽 화살표 ──────────────────────────
+// ── SELL Signal ────────────────────────────────────────────
 plotshape(sellSignal,
           title="SELL",
           text="SELL",
@@ -374,8 +566,7 @@ plotshape(sellSignal,
           size=size.huge)
 
 // ── 통합 대시보드 테이블 (우상단) ────────────────────────────
-// : 상단 지표 요약 + 하단 골든 셋업 체크리스트 합본
-var table dash = table.new(position.top_right, 2, 24, bgcolor=color.new(color.black, 15), border_color=color.new(color.gray, 60), border_width=1, frame_color=color.gray, frame_width=1)
+var table dash = table.new(position.top_right, 2, 48, bgcolor=color.new(color.black, 15), border_color=color.new(color.gray, 60), border_width=1, frame_color=color.gray, frame_width=1)
 
 // ════ 섹션 A: 지표 대시보드 ════
 table.cell(dash, 0, 0, "INDICATOR",  text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 10))
@@ -439,64 +630,193 @@ posLbl = posPct < 25 ? "LOW Zone" : posPct > 75 ? "HIGH Zone" : "MID Zone"
 table.cell(dash, 0, 11, "Position", text_color=color.white, text_size=size.small)
 table.cell(dash, 1, 11, posLbl + " (" + str.tostring(posPct) + "%)", text_color=color.white, text_size=size.small, bgcolor=posBg)
 
-buySig = buySignal ? "▲ BUY" : str.tostring(math.round(accumScore, 0)) + " / " + str.tostring(ACCUM_THRESHOLD)
-buyBg  = buySignal ? color.new(color.lime, 10) : nearBottom ? color.new(color.teal, 30) : color.new(color.gray, 50)
-table.cell(dash, 0, 12, "ACCUM",    text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 20))
-table.cell(dash, 1, 12, buySig,     text_color=color.white, text_size=size.small, bgcolor=buyBg)
+// ── 신규: OBV ───────────────────────────────────────────────
+obvTxt = obvRising ? "ACCUM ▲" : "DISTRIB ▼"
+obvBg  = obvRising ? color.new(color.lime, 20) : color.new(color.red, 20)
+table.cell(dash, 0, 12, "OBV",    text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 12, obvTxt,   text_color=color.white, text_size=size.small, bgcolor=obvBg)
+
+// ── 신규: CMF ───────────────────────────────────────────────
+cmfTxt = moneyInflow ? "INFLOW ▲ " + str.tostring(math.round(cmf20, 3)) : "OUTFLOW ▼ " + str.tostring(math.round(cmf20, 3))
+cmfBg  = moneyInflow ? color.new(color.lime, 20) : color.new(color.red, 20)
+table.cell(dash, 0, 13, "CMF",    text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 13, cmfTxt,   text_color=color.white, text_size=size.small, bgcolor=cmfBg)
+
+// ── 신규: EMA200 이격도 ─────────────────────────────────────
+distTxt = str.tostring(math.round(ema200_dist, 1)) + "%"
+distBg  = overextended ? color.new(color.red, 10) : ema200_dist > 15 ? color.new(color.orange, 20) : ema200_dist < -10 ? color.new(color.lime, 20) : color.new(color.gray, 40)
+distLbl = overextended ? "OVEREXT 🔥" : ema200_dist < -10 ? "UNDERVAL" : "NORMAL"
+table.cell(dash, 0, 14, "EMA200 Gap", text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 14, distLbl + " (" + distTxt + ")", text_color=color.white, text_size=size.small, bgcolor=distBg)
+
+// ── 신규: SAR 방향 ──────────────────────────────────────────
+sarTxt = sarBearish ? "BEARISH ▼" : "BULLISH ▲"
+sarBg  = sarBearish ? color.new(color.red, 20) : color.new(color.lime, 20)
+table.cell(dash, 0, 15, "SAR",    text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 15, sarTxt,   text_color=color.white, text_size=size.small, bgcolor=sarBg)
+
+// ── 배당 수익률 ───────────────────────────────────────────
+yieldTxt = (na(divYield) or divYield == 0) ? "N/A" : str.tostring(math.round(divYield, 2)) + "%"
+yieldBg  = isHighYield ? color.new(color.lime, 10) : color.new(color.gray, 40)
+table.cell(dash, 0, 16, "Div Yield",  text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 16, yieldTxt,      text_color=color.white, text_size=size.small, bgcolor=yieldBg)
+
+// ── 배당 성향 ───────────────────────────────────────────
+payoutTxt = (na(payoutRatio) or payoutRatio == 0) ? "N/A" : str.tostring(math.round(payoutRatio, 1)) + "%"
+payoutBg  = isDivTrap ? color.new(color.red, 20) : color.new(color.gray, 40)
+table.cell(dash, 0, 17, "Payout", text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 17, payoutTxt, text_color=color.white, text_size=size.small, bgcolor=payoutBg)
+
+// ════ 섹션 A1.5: 기업 건강 체크 ════
+healthLbl = isZombie ? "💩 ZOMBIE" : healthScore == 4 ? "🟢 HEALTHY" : healthScore == 3 ? "🟡 FAIR" : "🟠 WEAK"
+healthBg  = isZombie ? color.new(color.red, 0) : healthScore == 4 ? color.new(color.lime, 20) : healthScore == 3 ? color.new(color.yellow, 20) : color.new(color.orange, 20)
+table.cell(dash, 0, 18, "🏥 HEALTH", text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 10))
+table.cell(dash, 1, 18, healthLbl + " (" + str.tostring(healthScore) + "/4)", text_color=color.white, text_size=size.small, bgcolor=healthBg)
+
+ephsTxt = epsOk ? "✅ EPS > 0" : "❌ EPS ≤ 0"
+ephsBg  = epsOk ? color.new(color.lime, 25) : color.new(color.red, 25)
+table.cell(dash, 0, 19, ephsTxt, text_color=color.white, text_size=size.small, bgcolor=ephsBg)
+table.cell(dash, 1, 19, na(epsVal) ? "N/A" : str.tostring(math.round(epsVal, 2)), text_color=color.white, text_size=size.small, bgcolor=ephsBg)
+
+debtTxt2 = debtOk ? "✅ D/E OK" : "❌ D/E HIGH"
+debtBg2  = debtOk ? color.new(color.lime, 25) : color.new(color.red, 25)
+table.cell(dash, 0, 20, debtTxt2, text_color=color.white, text_size=size.small, bgcolor=debtBg2)
+table.cell(dash, 1, 20, na(debtEquity) ? "N/A" : str.tostring(math.round(debtEquity, 0)) + "%", text_color=color.white, text_size=size.small, bgcolor=debtBg2)
+
+fcfTxt2 = fcfOk ? "✅ FCF > 0" : "❌ FCF ≤ 0"
+fcfBg2  = fcfOk ? color.new(color.lime, 25) : color.new(color.red, 25)
+table.cell(dash, 0, 21, fcfTxt2, text_color=color.white, text_size=size.small, bgcolor=fcfBg2)
+table.cell(dash, 1, 21, "", text_color=color.white, text_size=size.small, bgcolor=fcfBg2)
+
+curTxt2 = currentOk ? "✅ Cur.Ratio" : "❌ Cur.Ratio"
+curBg2  = currentOk ? color.new(color.lime, 25) : color.new(color.red, 25)
+table.cell(dash, 0, 22, curTxt2, text_color=color.white, text_size=size.small, bgcolor=curBg2)
+table.cell(dash, 1, 22, na(currentRat) ? "N/A" : str.tostring(math.round(currentRat, 2)), text_color=color.white, text_size=size.small, bgcolor=curBg2)
+
+// ════ 섹션 A2: 스크리닝 지표 ════
+table.cell(dash, 0, 23, "📊 SCREENING", text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 10))
+table.cell(dash, 1, 23, "METRICS",     text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 10))
+
+volZ_Txt = str.tostring(math.round(volZ20, 2))
+volZ_Bg  = volZ20 > 2 ? color.new(color.blue, 10) : volZ20 < -1 ? color.new(color.orange, 20) : color.new(color.gray, 40)
+table.cell(dash, 0, 24, "Vol Z20", text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 24, volZ_Txt,  text_color=color.white, text_size=size.small, bgcolor=volZ_Bg)
+
+obvZ_Txt = str.tostring(math.round(obvZ20, 2))
+obvZ_Bg  = obvZ20 > 1.5 ? color.new(color.lime, 10) : obvZ20 < -1.5 ? color.new(color.red, 10) : color.new(color.gray, 40)
+table.cell(dash, 0, 25, "OBV Z20", text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 25, obvZ_Txt,  text_color=color.white, text_size=size.small, bgcolor=obvZ_Bg)
+
+adTxt = adSlope5 > 0 ? "INFLOW ▲" : "OUTFLOW ▼"
+adBg  = adSlope5 > 0 ? color.new(color.lime, 20) : color.new(color.red, 20)
+table.cell(dash, 0, 26, "A/D Slope", text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 26, adTxt,        text_color=color.white, text_size=size.small, bgcolor=adBg)
+
+emaGap1Txt = str.tostring(math.round(ema20_50gap, 2)) + "%"
+emaGap1Bg  = ema20_50gap > 2 ? color.new(color.lime, 20) : ema20_50gap < -2 ? color.new(color.red, 20) : color.new(color.gray, 40)
+table.cell(dash, 0, 27, "EMA20-50", text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 27, emaGap1Txt, text_color=color.white, text_size=size.small, bgcolor=emaGap1Bg)
+
+emaGap2Txt = str.tostring(math.round(ema50_200gap, 2)) + "%"
+emaGap2Bg  = ema50_200gap > 5 ? color.new(color.lime, 20) : ema50_200gap < -5 ? color.new(color.red, 20) : color.new(color.gray, 40)
+table.cell(dash, 0, 28, "EMA50-200", text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 28, emaGap2Txt,  text_color=color.white, text_size=size.small, bgcolor=emaGap2Bg)
+
+ema200sTxt = str.tostring(math.round(ema200_slope20, 2)) + "%"
+ema200sBg  = ema200_rising ? color.new(color.lime, 20) : ema200_falling ? color.new(color.red, 20) : color.new(color.gray, 40)
+table.cell(dash, 0, 29, "EMA200 Slope", text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 29, ema200sTxt,     text_color=color.white, text_size=size.small, bgcolor=ema200sBg)
+
+rocTxt = str.tostring(math.round(roc10, 2)) + "%"
+rocBg  = roc10 > 15 ? color.new(color.red, 10) : roc10 > 5 ? color.new(color.lime, 20) : roc10 < -10 ? color.new(color.orange, 20) : color.new(color.gray, 40)
+table.cell(dash, 0, 30, "ROC(10)", text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 30, rocTxt,    text_color=color.white, text_size=size.small, bgcolor=rocBg)
+
+bbPctTxt = str.tostring(math.round(bbPctB * 100, 0)) + "%"
+bbPctBg  = bbPctB < 0.2 ? color.new(color.lime, 10) : bbPctB > 0.9 ? color.new(color.red, 10) : color.new(color.gray, 40)
+table.cell(dash, 0, 31, "BB %B",  text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 31, bbPctTxt,  text_color=color.white, text_size=size.small, bgcolor=bbPctBg)
+
+dist10Txt = "▼" + str.tostring(math.round(distHigh10, 1)) + "% / ▲" + str.tostring(math.round(distLow10, 1)) + "%"
+dist10Bg  = distLow10 < 2 ? color.new(color.lime, 20) : distHigh10 > -1 ? color.new(color.red, 20) : color.new(color.gray, 40)
+table.cell(dash, 0, 32, "10D Dist", text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 32, dist10Txt,   text_color=color.white, text_size=size.small, bgcolor=dist10Bg)
+
+// ── ACCUM / SELL 스코어 ─────────────────────────────────────
+buySig = buySignal ? "▲ BUY" : isZombie ? "🚫 ZOMBIE" : str.tostring(math.round(accumScore, 0)) + " / " + str.tostring(ACCUM_THRESHOLD)
+buyBg  = buySignal ? color.new(color.lime, 10) : isZombie ? color.new(color.red, 0) : nearBottom ? color.new(color.teal, 30) : color.new(color.gray, 50)
+table.cell(dash, 0, 33, "ACCUM",    text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 20))
+table.cell(dash, 1, 33, buySig,     text_color=color.white, text_size=size.small, bgcolor=buyBg)
 
 sellSig = sellSignal ? "▼ SELL" : str.tostring(math.round(sellScore, 0)) + " / " + str.tostring(SELL_THRESHOLD)
 sellBg  = sellSignal ? color.new(color.red, 10) : color.new(color.gray, 50)
-table.cell(dash, 0, 13, "SELL",     text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 20))
-table.cell(dash, 1, 13, sellSig,    text_color=color.white, text_size=size.small, bgcolor=sellBg)
+table.cell(dash, 0, 34, "SELL",     text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 20))
+table.cell(dash, 1, 34, sellSig,    text_color=color.white, text_size=size.small, bgcolor=sellBg)
 
 
-// ════ 섹션 B: 골든 셋업 체크리스트 (dash 테이블 계속) ════
+// ════ 섹션 B: 골든 셋업 체크리스트 ════
 c1 = belowVWAP
 c2 = rsiVal < 40
-c3 = isSqueeze
+c3 = bbPctB < 0.2
 c4 = rangePos < 0.25
 c5 = range52w < 30
 c6 = stochOS
 c7 = bullDiv
 c8 = volDryUp or (volClimax and nearBottom)
+c9 = obvRising
+c10 = moneyInflow
+c11 = not isZombie
+c12 = adSlope5 > 0
+c13 = distLow10 < 2
 
-hitCount = (c1 ? 1 : 0) + (c2 ? 1 : 0) + (c3 ? 1 : 0) + (c4 ? 1 : 0) + (c5 ? 1 : 0) + (c6 ? 1 : 0) + (c7 ? 1 : 0) + (c8 ? 1 : 0)
-headerBg  = hitCount >= 6 ? color.new(#FFD700, 5) : hitCount >= 4 ? color.new(color.teal, 20) : color.new(color.gray, 30)
-headerTxt = hitCount >= 6 ? "🏆 " + str.tostring(hitCount) + "/8 PRIME" : hitCount >= 4 ? "⭐ " + str.tostring(hitCount) + "/8 Watch" : str.tostring(hitCount) + "/8 Not Ready"
+hitCount = (c1 ? 1 : 0) + (c2 ? 1 : 0) + (c3 ? 1 : 0) + (c4 ? 1 : 0) + (c5 ? 1 : 0) + (c6 ? 1 : 0) + (c7 ? 1 : 0) + (c8 ? 1 : 0) + (c9 ? 1 : 0) + (c10 ? 1 : 0) + (c11 ? 1 : 0) + (c12 ? 1 : 0) + (c13 ? 1 : 0)
+headerBg  = hitCount >= 9 ? color.new(#FFD700, 5) : hitCount >= 7 ? color.new(color.teal, 20) : color.new(color.gray, 30)
+headerTxt = hitCount >= 9 ? "🏆 " + str.tostring(hitCount) + "/13 PRIME" : hitCount >= 7 ? "⭐ " + str.tostring(hitCount) + "/13 Watch" : str.tostring(hitCount) + "/13 Not Ready"
 
-// 구분선 겸 골든셋업 헤더 (row 14)
-table.cell(dash, 0, 14, "🏆 GOLDEN SETUP", text_color=color.black, text_size=size.small, bgcolor=headerBg)
-table.cell(dash, 1, 14, headerTxt,          text_color=color.black, text_size=size.small, bgcolor=headerBg)
+table.cell(dash, 0, 35, "🏆 GOLDEN SETUP", text_color=color.black, text_size=size.small, bgcolor=headerBg)
+table.cell(dash, 1, 35, headerTxt,          text_color=color.black, text_size=size.small, bgcolor=headerBg)
 
-// 헬퍼 함수
 f_chk(cond, lbl) =>
     [cond ? "✅ " + lbl : "❌ " + lbl, cond ? color.new(color.lime, 25) : color.new(color.gray, 55)]
 
 [l1, b1] = f_chk(c1, "VWAP Below")
 [l2, b2] = f_chk(c2, "RSI < 40")
-[l3, b3] = f_chk(c3, "BB Squeeze")
+[l3, b3] = f_chk(c3, "BB %B < 20%")
 [l4, b4] = f_chk(c4, "LOW Zone 25%")
 [l5, b5] = f_chk(c5, "52W Low 30%")
 [l6, b6] = f_chk(c6, "Stoch Oversold")
 [l7, b7] = f_chk(c7, "Bullish Div")
 [l8, b8] = f_chk(c8, "Vol Dry/Climax")
+[l9, b9] = f_chk(c9, "OBV Accum")
+[l10, b10] = f_chk(c10, "CMF Inflow")
+[l11, b11] = f_chk(c11, "Healthy Co.")
+[l12, b12] = f_chk(c12, "A/D Inflow")
+[l13, b13] = f_chk(c13, "10D Bottom")
 
-table.cell(dash, 0, 15, l1, text_color=color.white, text_size=size.small, bgcolor=b1)
-table.cell(dash, 1, 15, "",  text_color=color.white, text_size=size.small, bgcolor=b1)
-table.cell(dash, 0, 16, l2, text_color=color.white, text_size=size.small, bgcolor=b2)
-table.cell(dash, 1, 16, "",  text_color=color.white, text_size=size.small, bgcolor=b2)
-table.cell(dash, 0, 17, l3, text_color=color.white, text_size=size.small, bgcolor=b3)
-table.cell(dash, 1, 17, "",  text_color=color.white, text_size=size.small, bgcolor=b3)
-table.cell(dash, 0, 18, l4, text_color=color.white, text_size=size.small, bgcolor=b4)
-table.cell(dash, 1, 18, "",  text_color=color.white, text_size=size.small, bgcolor=b4)
-table.cell(dash, 0, 19, l5, text_color=color.white, text_size=size.small, bgcolor=b5)
-table.cell(dash, 1, 19, "",  text_color=color.white, text_size=size.small, bgcolor=b5)
-table.cell(dash, 0, 20, l6, text_color=color.white, text_size=size.small, bgcolor=b6)
-table.cell(dash, 1, 20, "",  text_color=color.white, text_size=size.small, bgcolor=b6)
-table.cell(dash, 0, 21, l7, text_color=color.white, text_size=size.small, bgcolor=b7)
-table.cell(dash, 1, 21, "",  text_color=color.white, text_size=size.small, bgcolor=b7)
-table.cell(dash, 0, 22, l8, text_color=color.white, text_size=size.small, bgcolor=b8)
-table.cell(dash, 1, 22, "",  text_color=color.white, text_size=size.small, bgcolor=b8)
+table.cell(dash, 0, 36, l1, text_color=color.white, text_size=size.small, bgcolor=b1)
+table.cell(dash, 1, 36, "",  text_color=color.white, text_size=size.small, bgcolor=b1)
+table.cell(dash, 0, 37, l2, text_color=color.white, text_size=size.small, bgcolor=b2)
+table.cell(dash, 1, 37, "",  text_color=color.white, text_size=size.small, bgcolor=b2)
+table.cell(dash, 0, 38, l3, text_color=color.white, text_size=size.small, bgcolor=b3)
+table.cell(dash, 1, 38, "",  text_color=color.white, text_size=size.small, bgcolor=b3)
+table.cell(dash, 0, 39, l4, text_color=color.white, text_size=size.small, bgcolor=b4)
+table.cell(dash, 1, 39, "",  text_color=color.white, text_size=size.small, bgcolor=b4)
+table.cell(dash, 0, 40, l5, text_color=color.white, text_size=size.small, bgcolor=b5)
+table.cell(dash, 1, 40, "",  text_color=color.white, text_size=size.small, bgcolor=b5)
+table.cell(dash, 0, 41, l6, text_color=color.white, text_size=size.small, bgcolor=b6)
+table.cell(dash, 1, 41, "",  text_color=color.white, text_size=size.small, bgcolor=b6)
+table.cell(dash, 0, 42, l7, text_color=color.white, text_size=size.small, bgcolor=b7)
+table.cell(dash, 1, 42, "",  text_color=color.white, text_size=size.small, bgcolor=b7)
+table.cell(dash, 0, 43, l8, text_color=color.white, text_size=size.small, bgcolor=b8)
+table.cell(dash, 1, 43, "",  text_color=color.white, text_size=size.small, bgcolor=b8)
+table.cell(dash, 0, 44, l9, text_color=color.white, text_size=size.small, bgcolor=b9)
+table.cell(dash, 1, 44, "",  text_color=color.white, text_size=size.small, bgcolor=b9)
+table.cell(dash, 0, 45, l10, text_color=color.white, text_size=size.small, bgcolor=b10)
+table.cell(dash, 1, 45, "",  text_color=color.white, text_size=size.small, bgcolor=b10)
+table.cell(dash, 0, 46, l11, text_color=color.white, text_size=size.small, bgcolor=b11)
+table.cell(dash, 1, 46, "",  text_color=color.white, text_size=size.small, bgcolor=b11)
+table.cell(dash, 0, 47, l12, text_color=color.white, text_size=size.small, bgcolor=b12)
+table.cell(dash, 1, 47, "",  text_color=color.white, text_size=size.small, bgcolor=b12)
 
 // ============================================================
 // ─────────────── 15. ALERTS ─────────────────────────────────
