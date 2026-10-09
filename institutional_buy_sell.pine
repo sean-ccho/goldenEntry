@@ -1,11 +1,17 @@
 // ============================================================
-// INSTITUTIONAL GOLDEN ENTRY v5.0
+// INSTITUTIONAL GOLDEN ENTRY v8.0 — WALL STREET SIGNAL ENGINE
 // Full Screening Metrics + SMC + Wyckoff + Volume Delta
-// + Dividend Value + Multi-Factor Scoring
-// Designed for: Low-Risk Bottom Accumulation & Trend Top Exits
+// + Dividend Value + Multi-Factor Alpha Model
+// + Adaptive Thresholds + Falling Knife Protection
+// + FVG/Liquidity Sweep + VIX/DXY Macro Filter
+// + Signal Confidence Tiers + Rolling Backtest
+// v8: Buy-Low / Sell-High Location Gate + Primary-Trend Reversal Filter
+//     (저점 구간에서만 BUY, 고점 구간에서만 SELL — 위치 기반 신호)
+// v8.1: Dashboard follows chart scroll (과거 시점 표 조회) + Data Window 지표
+// Designed for: Dual Strategy (Bottom Accumulation + Momentum Breakout)
 // ============================================================
-//@version=5
-indicator("Institutional Buy & Sell v5", overlay=true, max_bars_back=500)
+//@version=6
+indicator("Institutional Buy & Sell v8", overlay=true, max_bars_back=600)
 
 // ============================================================
 // ─────────────────── USER INPUTS ────────────────────────────
@@ -32,6 +38,28 @@ show_sl_tp = input.bool(true, "Show Stop Loss / Take Profit", group=grp4)
 
 grp5 = "🛡️ Trailing Stop"
 trailAtrMult = input.float(3.0, "Trailing Stop ATR Multiplier", step=0.1, group=grp5, minval=1.0, maxval=5.0)
+
+grp6 = "🎯 Strategy Mode"
+enableAccumBuy    = input.bool(true,  "Enable Accumulation BUY (Bottom Reversal)", group=grp6)
+enableMomentumBuy = input.bool(true,  "Enable Momentum BUY (Breakout)",           group=grp6)
+enableRegimeFilter = input.bool(true, "Market Regime Filter (SPY EMA200)",         group=grp6)
+trendDampeningSell = input.bool(true, "Dampen SELL in Strong Uptrends",            group=grp6)
+
+grp7 = "🔬 v7 Institutional"
+enableFallingKnife = input.bool(true,  "Falling Knife Protection",     group=grp7)
+enableMacroFilter  = input.bool(true,  "VIX/DXY Macro Filter",        group=grp7)
+enableBacktest     = input.bool(true,  "Show Performance Metrics",     group=grp7)
+btEvalBars         = input.int(20,     "Backtest Eval Bars",           group=grp7, minval=5, maxval=100)
+
+grp8 = "🏛️ Wall Street Engine (v8)"
+useLocationGate        = input.bool(true,  "Buy-Low / Sell-High Location Gate",           group=grp8, tooltip="가격이 저점 구간일 때만 BUY, 고점 구간일 때만 SELL를 허용합니다. 싸게 사고 비싸게 파는 핵심 필터.")
+requireReversalConfirm = input.bool(false, "Require Reversal Confirmation in Downtrends", group=grp8, tooltip="켜면 주 하락추세에서 반전 확인(EMA20 회복/구조 돌파/투매 반전) 시에만 BUY. 보수적이지만 신호가 줄어듭니다.")
+blockSellAtBottom      = input.bool(true,  "Suppress SELL near Bottoms",                  group=grp8, tooltip="바닥권·과매도 구간에서는 SELL 신호를 억제해 저점 매도를 방지합니다.")
+useStateMachine        = input.bool(false, "Clean Alternating Signals (1 BUY → 1 SELL)",  group=grp8, tooltip="켜면 롱 진입 후 청산(SELL) 전까지 추가 BUY를 숨깁니다. 기본 꺼짐(저점 누적 매수 허용).")
+
+grp9 = "📋 Dashboard"
+dashFollowScroll = input.bool(true, "Dashboard Follows Chart Scroll",  group=grp9, tooltip="켜면 우상단 표가 '화면 오른쪽 끝에 보이는 봉' 기준으로 표시됩니다. 차트를 과거로 드래그하면 그 시점의 표를, 최신 봉이 화면에 보이면 최신 표를 보여줍니다. (파인스크립트 표는 마우스 커서 위치를 읽을 수 없어 스크롤 방식으로 동작) 끄면 항상 최신 봉 기준.")
+showDataWindow   = input.bool(true, "Show Key Metrics in Data Window", group=grp9, tooltip="켜면 주요 점수·지표가 데이터 창(우측 사이드바 › Data Window)에 표시되어, 마우스 커서를 올린 봉의 값을 바로 확인할 수 있습니다.")
 
 // ============================================================
 // ─────────────── 1. MULTI-TIMEFRAME TREND ───────────────────
@@ -134,78 +162,67 @@ sarBearish = close < sarVal  // SAR 아래로 이탈 = 매도 신호
 // ============================================================
 // ─────────────── 1j. 배당 가치 (Dividend Value) ──────────────
 // ============================================================
-// request.dividends()로 주당 배당금(DPS) 가져옴
 dpsVal      = request.dividends(syminfo.tickerid, dividends.net, barmerge.gaps_off)
-divYield    = close > 0 and dpsVal > 0 ? (dpsVal / close) * 100 : na  // 배당 수익률 직접 계산
-yieldAvg    = ta.sma(nz(divYield), 250) // 1년 평균 배당 수익률
+divYield    = close > 0 and dpsVal > 0 ? (dpsVal / close) * 100 : na
+yieldAvg    = ta.sma(nz(divYield), 250)
 
-// EPS로 배당 성향 직접 계산 (EPS는 health check에서 쓰므로 여기서 미리 가져옴)
 epsForPayout = request.financial(syminfo.tickerid, "EARNINGS_PER_SHARE", "TTM", ignore_invalid_symbol=true)
 payoutRatio  = (not na(epsForPayout) and epsForPayout > 0 and not na(dpsVal)) ? (dpsVal / epsForPayout) * 100 : na
 
-// 가치 판단: 현재 수익률이 역사적 평균보다 25% 이상 높을 때 (주가가 저평가)
 isHighYield = not na(divYield) and divYield > nz(yieldAvg, 0) * 1.25
-// 배당 함정: 벌어들이는 돈보다 배당을 더 많이 주면 위험 (100% 초과)
 isDivTrap   = not na(payoutRatio) and payoutRatio > 100.0
 
 // ============================================================
 // ─────────────── 1j-2. 기업 건강 체크 (Fundamental Health) ───
-// ── 목적: "싸지만 죽어가는 기업" 걸러내기 ────────────────────
 // ============================================================
-// EPS (주당순이익): 돈을 벌고 있는가? (epsForPayout은 배당 섹션에서 이미 가져옴)
 epsVal      = epsForPayout
 epsOk       = na(epsVal) ? true : epsVal > 0
 
-// Debt-to-Equity (부채비율): 빚이 감당 가능한가?
 debtEquity  = request.financial(syminfo.tickerid, "DEBT_TO_EQUITY", "FQ", ignore_invalid_symbol=true)
-debtOk      = na(debtEquity) ? true : debtEquity < 300  // D/E < 300% (데이터 없으면 통과)
+debtOk      = na(debtEquity) ? true : debtEquity < 300
 
-// Free Cash Flow (잉여현금흐름): 현금을 태우고 있진 않은가?
 fcfVal      = request.financial(syminfo.tickerid, "FREE_CASH_FLOW", "TTM", ignore_invalid_symbol=true)
-fcfOk       = na(fcfVal) ? true : fcfVal > 0  // FCF > 0 = 현금 창출 중
+fcfOk       = na(fcfVal) ? true : fcfVal > 0
 
-// Current Ratio (유동비율): 단기 부채를 갚을 수 있는가?
 currentRat  = request.financial(syminfo.tickerid, "CURRENT_RATIO", "FQ", ignore_invalid_symbol=true)
-currentOk   = na(currentRat) ? true : currentRat > 0.8  // 유동비율 > 0.8
+currentOk   = na(currentRat) ? true : currentRat > 0.8
 
-// 건강 점수 (0~4, 높을수록 건강)
 healthScore = (epsOk ? 1 : 0) + (debtOk ? 1 : 0) + (fcfOk ? 1 : 0) + (currentOk ? 1 : 0)
-
-// 좀비 기업: 4개 중 2개 이상 실패 → BUY 차단
 isZombie    = healthScore <= 1
 
 // ============================================================
 // ─────────────── 1k. 스크리닝 추가 지표 ─────────────────────
 // ============================================================
-volSma       = ta.sma(volume, vol_len)  // 거래량 MA (여러 섹션에서 공유)
+volSma       = ta.sma(volume, vol_len)
 
-// 거래량Z(20): (거래량 – MA20) / 표준편차 → 거래량 이상치 탐지
 volStdev20   = ta.stdev(volume, 20)
 volZ20       = volStdev20 > 0 ? (volume - volSma) / volStdev20 : 0
 
-// 거래대금안정비: 20일 거래대금 / 60일 거래대금 → 안정적 유동성 확인
 tradeval     = close * volume
 tradeval20   = ta.sma(tradeval, 20)
 tradeval60   = ta.sma(tradeval, 60)
 tvStability  = tradeval60 > 0 ? tradeval20 / tradeval60 : 1.0
 
-// OBV Z20: OBV를 20일 Z-score로 정규화
 obvSma20     = ta.sma(obvVal, 20)
 obvStdev20   = ta.stdev(obvVal, 20)
 obvZ20       = obvStdev20 > 0 ? (obvVal - obvSma20) / obvStdev20 : 0
 
-// A/D 기울기(5): 누적 분배 지수 5일 변화율
 adLine       = ta.cum(mfm * volume)
 adSlope5     = adLine - adLine[5]
 
-// ROC(10): 10일 가격 변화율
 roc10        = ta.roc(close, 10)
 
-// 10일 저점·고점 괴리
 low10d       = ta.lowest(low, 10)
 high10d      = ta.highest(high, 10)
-distLow10    = low10d  > 0 ? (close / low10d  - 1) * 100 : 0  // 저점 대비 %
-distHigh10   = high10d > 0 ? (close / high10d - 1) * 100 : 0  // 고점 대비 % (음수)
+distLow10    = low10d  > 0 ? (close / low10d  - 1) * 100 : 0
+distHigh10   = high10d > 0 ? (close / high10d - 1) * 100 : 0
+
+// ============================================================
+// ─────────────── 1L. HELPER: tanh 근사 함수 ──────────────────
+// ============================================================
+f_tanh(float x) =>
+    x2 = x * x
+    x > 3.0 ? 1.0 : x < -3.0 ? -1.0 : x * (27.0 + x2) / (27.0 + 9.0 * x2)
 
 // ============================================================
 // ─────────────── 2. WYCKOFF ACCUMULATION ZONE ───────────────
@@ -247,7 +264,6 @@ bearDiv      = priceHigh1 > priceHigh2 and rsiHigh1 < rsiHigh2 and rsiVal > 50
 // ============================================================
 // ─────────────── 4. VOLUME ANALYSIS (SMART MONEY) ───────────
 // ============================================================
-// volSma already defined in section 1k
 rvol         = volume / volSma
 
 isHighVol    = rvol > vol_mult
@@ -257,11 +273,11 @@ volDryUp     = rvol < 0.6
 avgRecentVol = (volume + volume[1] + volume[2]) / 3
 volPickup    = volume > avgRecentVol * 1.2
 
-// 거래량 감소 중 상승 = 약세 상승 (천장 임박)
 volDecliningRally = close > close[3] and volume < volume[3] and volume[1] < volume[2] and rsiVal > 60
 
 // ============================================================
 // ─────────────── 5. SMART MONEY CONCEPT (SMC) ───────────────
+// ── v7: FVG + Liquidity Sweep 추가 ──────────────────────────
 // ============================================================
 bullOB_high  = ta.highest(high[1], 3)
 bullOB_low   = ta.lowest(low[1], 3)
@@ -271,6 +287,30 @@ bosBreakUp   = close > bos_high[1]
 
 prevHighs    = ta.highest(high, 15)
 choch_bull   = close > prevHighs[1] and isBearTrend[1]
+
+// ── v7: Fair Value Gap (FVG) — 기관 진입 가격 비효율 ────────
+// Bullish FVG: 3봉 사이 가격 갭 (current low > 2봉 전 high)
+fvgBull      = low > high[2] and close[1] > open[1]
+// Bearish FVG: 3봉 사이 가격 갭 (current high < 2봉 전 low)
+fvgBear      = high < low[2] and close[1] < open[1]
+
+// FVG Fill: 가격이 갭을 채우러 돌아왔을 때 (기관 주문 대기 지점)
+barsSinceFvgBull = ta.barssince(fvgBull)
+fvgBullFillPrice = ta.valuewhen(fvgBull, high[2], 0)
+fvgBullFill  = barsSinceFvgBull <= 15 and barsSinceFvgBull > 0 and close <= nz(fvgBullFillPrice, close) * 1.02 and close > open
+
+barsSinceFvgBear = ta.barssince(fvgBear)
+fvgBearFillPrice = ta.valuewhen(fvgBear, low[2], 0)
+fvgBearFill  = barsSinceFvgBear <= 15 and barsSinceFvgBear > 0 and close >= nz(fvgBearFillPrice, close) * 0.98 and close < open
+
+// ── v7: Liquidity Sweep — 스탑 헌팅 후 반전 ─────────────────
+// 매도측 유동성 소탕: 이전 20봉 저점 아래로 위킹 후 양봉 회복
+prevLow20    = ta.lowest(low[1], 20)
+liqSweepBull = low < prevLow20 and close > prevLow20 and close > open
+
+// 매수측 유동성 소탕: 이전 20봉 고점 위로 위킹 후 음봉 하락
+prevHigh20   = ta.highest(high[1], 20)
+liqSweepBear = high > prevHigh20 and close < prevHigh20 and close < open
 
 // ============================================================
 // ─────────────── 6. MOMENTUM CONFIRMATION ───────────────────
@@ -290,6 +330,7 @@ stochCrossDown = ta.crossunder(stochK, stochD) and stochK > 70
 
 // ============================================================
 // ─────────────── 7. CANDLE PATTERN RECOGNITION ──────────────
+// ── v7: 고급 패턴 추가 ─────────────────────────────────────
 // ============================================================
 bullEngulf   = close > open and close[1] < open[1] and 
                close > open[1] and open < close[1]
@@ -297,26 +338,29 @@ bullEngulf   = close > open and close[1] < open[1] and
 lowerWick    = open > close ? (close - low) : (open - low)
 upperWick    = open > close ? (high - open) : (high - close)
 hammerBody   = math.abs(close - open)
-isHammer     = lowerWick > hammerBody * 2 and upperWick < hammerBody * 0.5 and 
-               lowerWick > (high - low) * 0.55
+isHammer     = lowerWick > hammerBody * 2 and upperWick < hammerBody * 0.5 and lowerWick > (high - low) * 0.55
 
-bullHarami   = close[1] < open[1] and close > open and
-               close < open[1] and open > close[1]
+bullHarami   = close[1] < open[1] and close > open and close < open[1] and open > close[1]
 
-mornStar     = close[2] < open[2] and
-               math.abs(close[1] - open[1]) < (high[1] - low[1]) * 0.3 and
-               close > open and close > (open[2] + close[2]) / 2
+mornStar     = close[2] < open[2] and math.abs(close[1] - open[1]) < (high[1] - low[1]) * 0.3 and close > open and close > (open[2] + close[2]) / 2
 
-bearEngulf   = close < open and close[1] > open[1] and
-               close < open[1] and open > close[1]
+bearEngulf   = close < open and close[1] > open[1] and close < open[1] and open > close[1]
 
-isShootingStar = upperWick > hammerBody * 2 and lowerWick < hammerBody * 0.5 and
-                 upperWick > (high - low) * 0.55 and close < open
+isShootingStar = upperWick > hammerBody * 2 and lowerWick < hammerBody * 0.5 and upperWick > (high - low) * 0.55 and close < open
 
-// Evening Star (3봉 천장 반전 패턴)
-eveningStar  = close[2] > open[2] and
-               math.abs(close[1] - open[1]) < (high[1] - low[1]) * 0.3 and
-               close < open and close < (open[2] + close[2]) / 2
+eveningStar  = close[2] > open[2] and math.abs(close[1] - open[1]) < (high[1] - low[1]) * 0.3 and close < open and close < (open[2] + close[2]) / 2
+
+// ── v7: Three White Soldiers (3연속 양봉 — 강한 반전) ────────
+threeWhiteSoldiers = close > open and close[1] > open[1] and close[2] > open[2] and close > close[1] and close[1] > close[2] and low > low[1] and low[1] > low[2]
+
+// ── v7: Three Black Crows (3연속 음봉 — 강한 하락) ───────────
+threeBlackCrows = close < open and close[1] < open[1] and close[2] < open[2] and close < close[1] and close[1] < close[2]
+
+// ── v7: Tweezer Bottom (동일 저점 2봉 — 지지 확인) ───────────
+tweezerBottom = math.abs(low - low[1]) < ta.atr(14) * 0.1 and close[1] < open[1] and close > open
+
+// ── v7: Inside Bar (가격 수축 → 돌파 임박) ───────────────────
+insideBar = high < high[1] and low > low[1]
 
 // ============================================================
 // ─────────────── 8. SUPPORT / RESISTANCE ZONES ──────────────
@@ -325,11 +369,141 @@ pivotHigh    = ta.pivothigh(high, 5, 5)
 pivotLow     = ta.pivotlow(low, 5, 5)
 
 // ============================================================
+// ─────────────── 8b. ATR ─────────────────────────────────────
+// ============================================================
+atrLen   = 14
+atrVal   = ta.atr(atrLen)
+
+// ============================================================
+// ─────────────── 8c. 다기간 수익률 (Alpha Model 입력) ────────
+// ============================================================
+ret_21d  = close / close[21] - 1.0
+ret_63d  = close / close[63] - 1.0
+ret_126d = close / close[126] - 1.0
+
+atrPctVal    = atrVal / close
+atrMedian252 = ta.percentile_linear_interpolation(atrPctVal * 100, 252, 50) / 100
+
+// ============================================================
+// ─────────────── 8d. 5-FACTOR ALPHA MODEL ────────────────────
+// ============================================================
+mom_1m = f_tanh(ret_21d / 0.10)
+mom_3m = f_tanh(ret_63d / 0.20)
+mom_6m = f_tanh(ret_126d / 0.30)
+factorMomentum = 0.45 * mom_1m + 0.35 * mom_3m + 0.20 * mom_6m
+
+emaAlignInput  = (ema20_50gap / 100.0 + ema50_200gap / 100.0) / 0.06
+emaAlignment   = f_tanh(emaAlignInput)
+adxFScore      = f_tanh((adxVal - 25.0) / 15.0)
+macdDirScore   = f_tanh(histLine / (close * 0.005))
+factorTrend    = 0.40 * emaAlignment + 0.35 * adxFScore + 0.25 * macdDirScore
+
+obvScoreF      = f_tanh(obvZ20 / 2.0)
+cmfScoreF      = f_tanh(cmf20 / 0.15)
+volZScoreF     = f_tanh(volZ20 / 3.0)
+factorVolume   = 0.40 * obvScoreF + 0.35 * cmfScoreF + 0.25 * volZScoreF
+
+volRatio       = atrMedian252 > 0.0001 ? atrPctVal / atrMedian252 : 1.0
+lowVolScore    = f_tanh((1.0 - volRatio) / 0.3)
+contractionF   = atrMedian252 > 0.0001 ? f_tanh((atrMedian252 - atrPctVal) / atrMedian252 / 0.3) : 0.0
+factorVolatility = 0.55 * lowVolScore + 0.45 * contractionF
+
+rsiMrScore     = f_tanh((50.0 - rsiVal) / 10.0 / 1.5)
+bbMrScore      = f_tanh((0.5 - bbPctB) / 0.3)
+factorMeanRev  = 0.55 * rsiMrScore + 0.45 * bbMrScore
+
+alphaScore = 0.30 * factorMomentum + 0.25 * factorTrend + 0.15 * factorVolume + 0.15 * factorVolatility + 0.15 * factorMeanRev
+
+// ============================================================
+// ─────────────── 8e. MARKET REGIME (시장 체제 감지) ──────────
+// ============================================================
+spyClose    = request.security("SPY", timeframe.period, close, lookahead=barmerge.lookahead_off)
+spyEma200   = request.security("SPY", timeframe.period, ta.ema(close, 200), lookahead=barmerge.lookahead_off)
+spyAboveEma = not na(spyClose) and not na(spyEma200) ? spyClose > spyEma200 : true
+
+isBullRegime = spyAboveEma and isBullTrend
+isBearRegime = not spyAboveEma and isBearTrend
+
+// ============================================================
+// ─────────────── 8f. VIX/DXY 매크로 필터 (v7 신규) ──────────
+// ── VIX: 시장 공포, DXY: 달러 강세 → 위험자산 압력 ──────────
+// ============================================================
+vixClose  = request.security("CBOE:VIX", timeframe.period, close, lookahead=barmerge.lookahead_off)
+vixEma20  = request.security("CBOE:VIX", timeframe.period, ta.ema(close, 20), lookahead=barmerge.lookahead_off)
+vixAvail  = not na(vixClose) and not na(vixEma20)
+vixSpike  = vixAvail and vixClose > vixEma20 * 1.3     // VIX 30%+ 급등 = 패닉
+vixExtreme = vixAvail and vixClose > 30                  // VIX 30+ = 극단적 공포
+
+dxyClose  = request.security("TVC:DXY", timeframe.period, close, lookahead=barmerge.lookahead_off)
+dxyEma50  = request.security("TVC:DXY", timeframe.period, ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+dxyAvail  = not na(dxyClose) and not na(dxyEma50)
+dxyStrong = dxyAvail and dxyClose > dxyEma50             // 달러 강세 = 위험자산 압력
+
+// 매크로 리스크 레벨 (0-3)
+macroRisk = (vixSpike ? 1 : 0) + (vixExtreme ? 1 : 0) + (dxyStrong ? 1 : 0)
+
+// 매크로 임계값 조정
+macroThreshAdj = enableMacroFilter ? (macroRisk >= 3 ? 15 : macroRisk >= 2 ? 10 : 0) : 0
+macroAllowMom  = not enableMacroFilter or macroRisk < 2
+
+// ============================================================
+// ─────────────── 8g. 변동성 체제 감지 (v7 신규) ─────────────
+// ── ATR 백분위로 시장 변동성 4단계 분류 → 임계값 자동 조정 ──
+// ============================================================
+volRegime = na(atrMedian252) or atrMedian252 < 0.0001 ? 1 : atrPctVal > atrMedian252 * 1.8 ? 3 : atrPctVal > atrMedian252 * 1.3 ? 2 : atrPctVal > atrMedian252 * 0.7 ? 1 : 0
+
+// 체제별 적응형 기본 임계값 (매크로 조정 전)
+baseAccumThresh = volRegime == 3 ? 65 : volRegime == 2 ? 55 : volRegime == 1 ? 45 : 40
+baseSellThresh  = volRegime == 3 ? 60 : volRegime == 2 ? 55 : volRegime == 1 ? 50 : 45
+
+// 최종 적응형 임계값 (변동성 + 매크로 보정)
+adaptAccumThresh = baseAccumThresh + macroThreshAdj
+adaptSellThresh  = baseSellThresh
+
+// 적응형 쿨다운 (고변동성 시 신호 간격 확대)
+adaptCooldownBuy  = volRegime >= 2 ? 15 : 8
+adaptCooldownSell = volRegime >= 2 ? 18 : 12
+
+volRegimeTxt = volRegime == 3 ? "EXTREME" : volRegime == 2 ? "HIGH" : volRegime == 1 ? "NORMAL" : "LOW"
+
+// ============================================================
+// ─────────────── 8g-2. 주추세 & 반전확인 (v8 Wall St) ────────
+// ── 낙하하는 칼 매수 방지의 핵심: "하락이 멈췄다"는 증거 요구 ─
+// ============================================================
+// 주 추세(Primary Trend) 판정: EMA200 하락 + 가격이 200선 아래 + 50<200
+ema200Declining    = ema200_slope20 < -0.5
+confirmedDowntrend = ema200Declining and close < ema_slow_v and ema_fast_v < ema_slow_v
+
+// 반전 확인: 하락 레그가 실제로 꺾였다는 증거 (하나라도 충족)
+reclaimEma20     = ta.crossover(close, ema20_v)                         // EMA20 회복
+reclaimEma50     = ta.crossover(close, ema_fast_v)                      // EMA50 회복
+shortStructBreak = close > ta.highest(high, 5)[1] and close > open       // 단기 스윙 고점 돌파
+capitulationRev  = (volClimax[1] or volClimax[2]) and close > open and close > close[1] // 투매 후 반전 봉
+divReversal      = bullDiv and (stochCrossUp or macdCrossUp or reclaimEma20)            // 다이버전스 + 모멘텀 전환
+
+reversalConfirmed = reclaimEma20 or reclaimEma50 or shortStructBreak or capitulationRev or divReversal
+
+// 하락추세 매수 허용 게이트 (Wall St 핵심): 확정 하락추세면 반전 확인 필수
+downtrendBuyOK = not requireReversalConfirm or not confirmedDowntrend or reversalConfirmed
+
+// ============================================================
+// ─────────────── 8h. FALLING KNIFE 차단 (v8) ───────────────
+// ── 거래량 동반 가속 급락만 차단 (완만한 바닥 다지기는 매수 허용) ─
+// ── 사소한 반등이 아닌, 확정된 반전/거래량 고갈 시에만 해제 ──
+// ============================================================
+// 가속 급락만 차단 (거래량 동반 급락). 완만한 바닥 다지기는 매수 허용 → 저점 누적매수 가능.
+knifeAccel        = close < ema_slow_v and ret_21d < -0.12 and volume > volSma * 1.3
+knifeDecelerating = reversalConfirmed or (ret_21d > nz(ret_21d[3], ret_21d) and volDryUp)
+priceAccelDown    = knifeAccel
+
+fallingKnifeActive = enableFallingKnife and priceAccelDown and not knifeDecelerating
+
+// ============================================================
 // ─────────────── 9. ACCUMULATION ZONE BUY LOGIC ─────────────
-// ── 핵심 철학: 가격이 저점 근처에 있을 때만 BUY 발동 ──────────
+// ── v7: FVG Fill, Liquidity Sweep, 고급 캔들, 매크로 통합 ───
 // ============================================================
 
-// [ GATE 조건 ] 다중 범위 바닥 감지 (30봉 / 60봉 / 120봉)
+// [ GATE 조건 ] 다중 범위 바닥 감지
 recentHigh30 = ta.highest(high, 30)
 recentLow30  = ta.lowest(low, 30)
 rangePos     = (close - recentLow30) / math.max(recentHigh30 - recentLow30, 0.01)
@@ -342,23 +516,27 @@ recentHigh120 = ta.highest(high, 120)
 recentLow120  = ta.lowest(low, 120)
 rangePos120   = (close - recentLow120) / math.max(recentHigh120 - recentLow120, 0.01)
 
-// 30봉 OR 60봉 기준 하위 35%에 있어야 함
-nearBottom   = rangePos < 0.35 or rangePos60 < 0.30
-
-// [ GATE 조건 ] RSI가 50 미만
+nearBottom   = rangePos < 0.35 or rangePos60 < 0.30 or rangePos120 < 0.25
 rsiGate      = rsiVal < 50
+
+// v8: 가격 위치 존 (저점=BUY, 고점=SELL) — 최근 구간(52주·30봉) 가중으로 지역 고/저점 반영
+locScore   = 0.45 * (range52w / 100) + 0.35 * rangePos + 0.20 * rangePos60   // 0=저점, 1=고점
+inBuyZone  = locScore < 0.45
+inSellZone = locScore > 0.55
+buyLocationOK  = not useLocationGate or inBuyZone
+sellLocationOK = not useLocationGate or inSellZone
 
 // 매집 스코어
 accumScore = 0.0
 
 // ─ 저점 깊이
 accumScore := accumScore + (rangePos < 0.15 ? 20 : rangePos < 0.25 ? 12 : 0)
-accumScore := accumScore + (rangePos120 < 0.20 ? 10 : 0)  // 장기적으로도 바닥 근처
+accumScore := accumScore + (rangePos120 < 0.20 ? 10 : 0)
 
 // ─ RSI 과매도 강도
 accumScore := accumScore + (rsiVal < rsi_os ? 20 : rsiVal < rsi_os + 10 ? 10 : 0)
 
-// ─ 불리시 다이버전스 (최고 신뢰 반전 신호)
+// ─ 불리시 다이버전스
 accumScore := accumScore + (bullDiv ? 30 : 0)
 
 // ─ Wyckoff Spring
@@ -369,16 +547,14 @@ accumScore := accumScore + (volClimax ? 15 : 0)
 accumScore := accumScore + (volDryUp ? 10 : 0)
 accumScore := accumScore + (isHighVol and close > open ? 15 : 0)
 
-// ─ OBV 매집 확인 (세력 조용히 매집 중)
+// ─ OBV 매집 확인
 accumScore := accumScore + (obvRising ? 15 : 0)
-
-// ─ OBV Z20 급등 (매집 이상치 감지)
 accumScore := accumScore + (obvZ20 > 1.5 ? 12 : 0)
 
 // ─ CMF 자금 유입
 accumScore := accumScore + (moneyInflow ? 12 : 0)
 
-// ─ A/D 기울기 양전환 (자금 유입 가속)
+// ─ A/D 기울기 양전환
 accumScore := accumScore + (adSlope5 > 0 and nearBottom ? 10 : 0)
 
 // ─ 캔들 반전 패턴
@@ -387,6 +563,10 @@ accumScore := accumScore + (isHammer ? 20 : 0)
 accumScore := accumScore + (bullEngulf ? 15 : 0)
 accumScore := accumScore + (bullHarami ? 8  : 0)
 
+// ─ v7: 고급 캔들 패턴
+accumScore := accumScore + (threeWhiteSoldiers ? 20 : 0)
+accumScore := accumScore + (tweezerBottom ? 15 : 0)
+
 // ─ 모멘텀 반전
 accumScore := accumScore + (stochCrossUp ? 15 : 0)
 accumScore := accumScore + (macdCrossUp ? 10 : 0)
@@ -394,35 +574,73 @@ accumScore := accumScore + (macdCrossUp ? 10 : 0)
 // ─ SMC / 구조 반전
 accumScore := accumScore + (choch_bull ? 12 : 0)
 
+// ─ v7: FVG Fill (기관 주문 대기 지점에서 반등)
+accumScore := accumScore + (fvgBullFill ? 15 : 0)
+
+// ─ v7: Liquidity Sweep (스탑 헌팅 후 반전 — 최고 확신 SMC 신호)
+accumScore := accumScore + (liqSweepBull ? 20 : 0)
+
 // ─ VWAP (기관 평균가보다 싸게)
 accumScore := accumScore + (belowVWAP ? 10 : 0)
 
-// ─ 볼린저 %B 저점 (밴드 하단 20% 이내)
+// ─ 볼린저 %B 저점
 accumScore := accumScore + (bbPctB < 0.2 ? 12 : isSqueeze ? 8 : 0)
 
-// ─ EMA200 기울기 반전 (하락→평탄/상승 전환)
+// ─ EMA200 기울기 반전
 accumScore := accumScore + (ema200_slope20 > -0.5 and ema200_slope20[5] < -1 ? 12 : 0)
 
-// ─ EMA50 기울기 평탄화 (추세 전환 조짐)
+// ─ EMA50 기울기 평탄화
 accumScore := accumScore + (ema50_flattening ? 10 : 0)
 
-// ─ 10일 저점 근처 (저점 대비 2% 이내)
+// ─ 10일 저점 근처
 accumScore := accumScore + (distLow10 < 2 ? 8 : 0)
 
-// ─ Weekly 트렌드 위 (장기 방향 일치)
+// ─ Weekly 트렌드
 accumScore := accumScore + (weeklyAbove ? 10 : 0)
 
-// ─ 가치 점수: 배당 수익률 매력 (저점 메리트)
+// ─ 배당 가치
 accumScore := accumScore + (isHighYield ? 15 : 0)
-
-// ─ 배당 함정 패널티 (배당이 지속 불가능할 때 감점)
 accumScore := accumScore + (isDivTrap ? -25 : 0)
 
-// ─ 좀비 기업 패널티 (기업 건강 매우 위험)
+// ─ 좀비 기업 패널티
 accumScore := accumScore + (isZombie ? -30 : 0)
 
 // ============================================================
+// ─────────────── 9b. MOMENTUM BUY LOGIC ─────────────────────
+// ============================================================
+pullbackToEma = ema_fast_v > ema_slow_v and close <= ema20_v * 1.01 and close > ema_fast_v * 0.98 and rsiVal < 50 and rsiVal > 30 and histLine > histLine[1]
+
+momCoreGate = (ema20_v > ema_fast_v and histLine > 0) or pullbackToEma
+
+momSupRsi    = rsiVal < 55
+momSupVol    = rvol > 1.8
+momSupAdx    = adxVal > 20
+momSupObv    = obvRising or roc10 > 0
+momSupAtr    = atrPctVal < nz(atrMedian252, 0.05) * 1.5
+momSupportCount = (momSupRsi ? 1 : 0) + (momSupVol ? 1 : 0) + (momSupAdx ? 1 : 0) + (momSupObv ? 1 : 0) + (momSupAtr ? 1 : 0)
+
+MOM_THRESHOLD = 40
+momScore = 0.0
+
+momScore := momScore + (momCoreGate ? 20 : 0)
+momScore := momScore + (alphaScore > 0.3 ? 15 : alphaScore > 0 ? 8 : 0)
+momScore := momScore + (ema20_v > ema_fast_v and ema_fast_v > ema_slow_v ? 10 : 0)
+momScore := momScore + (rvol > 1.8 ? 15 : rvol > 1.2 ? 8 : 0)
+momScore := momScore + (isStrongTrend ? 10 : 0)
+momScore := momScore + (factorMomentum > 0.5 ? 15 : factorMomentum > 0.25 ? 8 : 0)
+momScore := momScore + (factorTrend > 0.5 ? 10 : factorTrend > 0.25 ? 5 : 0)
+momScore := momScore + (obvRising ? 8 : 0)
+momScore := momScore + (moneyInflow ? 8 : 0)
+momScore := momScore + (weeklyAbove ? 10 : 0)
+// 과열 패널티
+momScore := momScore + (rsiVal > 75 ? -20 : 0)
+momScore := momScore + (roc10 > 20 ? -15 : 0)
+momScore := momScore + (bbPctB > 1.0 ? -10 : 0)
+momScore := momScore + (isZombie ? -30 : 0)
+
+// ============================================================
 // ─────────────── 10. SELL SIGNAL LOGIC ──────────────────────
+// ── v7: FVG Bear Fill, Liquidity Sweep, 고급 캔들 통합 ──────
 // ============================================================
 sellScore = 0.0
 
@@ -452,79 +670,188 @@ sellScore := sellScore + (recentHighPos and eveningStar ? 18 : 0)
 // ─ 구조 붕괴
 sellScore := sellScore + (close < ta.lowest(low[1], 10) ? 10 : 0)
 
-// ──── 신규 SELL 지표 ────
-
 // ─ EMA200 이격도 과열
-sellScore := sellScore + (overextended ? 20 : 0)
+sellScore := sellScore + (overextended and not isBullRegime ? 20 : overextended ? 8 : 0)
 
-// ─ 52주 고점 근처 (상위 85% 이상)
+// ─ 52주 고점 근처
 near52wHigh = range52w > 85
-sellScore := sellScore + (near52wHigh ? 15 : 0)
+sellScore := sellScore + (near52wHigh and factorTrend < 0 ? 15 : 0)
 
 // ─ BB 상단 돌파 + RSI > 70
 sellScore := sellScore + (bbUpperTouch and rsiVal > 70 ? 15 : 0)
 
 // ─ Parabolic SAR 이탈
-sellScore := sellScore + (sarBearish ? 15 : 0)
+sellScore := sellScore + (sarBearish and not isBullTrend ? 15 : 0)
 
-// ─ 이중 과매수 (RSI + Stochastic 동시)
+// ─ 이중 과매수
 dualOverbought = rsiVal > 70 and stochOB
 sellScore := sellScore + (dualOverbought ? 20 : 0)
 
-// ─ 거래량 감소 추세 중 상승 (약세 랠리 = 천장 임박)
+// ─ 거래량 감소 추세 중 상승
 sellScore := sellScore + (volDecliningRally ? 12 : 0)
 
-// ─ 볼린저 %B 고점 (밴드 상단 80% 이상 + 과매수)
+// ─ 볼린저 %B 고점
 sellScore := sellScore + (bbPctB > 0.9 and rsiVal > 65 ? 12 : 0)
 
-// ─ 10일 고점 근처 (고점 대비 1% 이내) + 약세 신호
+// ─ 10일 고점 근처 + 약세 신호
 sellScore := sellScore + (distHigh10 > -1 and bearDiv ? 10 : 0)
 
-// ─ ROC(10) 과열 (10일간 15% 이상 급등)
+// ─ ROC(10) 과열
 sellScore := sellScore + (roc10 > 15 ? 12 : 0)
 
-// ─ OBV Z20 급락 (세력 매도 이상치)
+// ─ OBV Z20 급락
 sellScore := sellScore + (obvZ20 < -1.5 and rsiVal > 50 ? 12 : 0)
 
-// ─ A/D 기울기 음전환 (고점에서 자금 유출)
+// ─ A/D 기울기 음전환
 sellScore := sellScore + (adSlope5 < 0 and recentHighPos ? 10 : 0)
 
-// ─ EMA20 < EMA50 (단기 추세 붕괴)
+// ─ EMA20 < EMA50
 sellScore := sellScore + (ema20_50gap < -2 ? 10 : 0)
+
+// ─ v7: Three Black Crows (강한 하락 캔들 연속)
+sellScore := sellScore + (threeBlackCrows and recentHighPos ? 15 : 0)
+
+// ─ v7: FVG Bear Fill (기관 매도 지점으로 되돌림)
+sellScore := sellScore + (fvgBearFill and rsiVal > 50 ? 12 : 0)
+
+// ─ v7: Liquidity Sweep Bear (고점 스탑 헌팅 후 반전)
+sellScore := sellScore + (liqSweepBear and rsiVal > 60 ? 15 : 0)
+
+// ── SELL 코어 조건 ──────────────────────────────────────────
+earlyBearWarning = (bearDiv and rsiVal > 65) or
+                   dualOverbought or
+                   (bbUpperTouch and volDecliningRally) or
+                   (sarBearish and rsiVal > 60) or
+                   (eveningStar or (bearEngulf and recentHighPos)) or
+                   (liqSweepBear and recentHighPos)  // v7: 유동성 소탕 추가
+
+lagBearCondition = ema20_v < ema_fast_v or histLine < 0
+sellCoreCondition = earlyBearWarning or lagBearCondition
+
+// ── SELL 감쇄 ───────────────────────────────────────────────
+trendStrengthVal = math.max(factorTrend, 0.0)
+hasDistributionEvidence = (not obvRising) or (not moneyInflow) or bearDiv or volDecliningRally
+dampBypass = earlyBearWarning or hasDistributionEvidence
+
+trendDampFactor  = trendDampeningSell and not dampBypass ? math.max(1.0 - trendStrengthVal * 0.3, 0.6) : 1.0
+emaDampFactor    = (ema20_50gap > 3 and ema50_200gap > 5) and not dampBypass ? 0.85 : 1.0
+sellDampCombined = math.max(trendDampFactor * emaDampFactor, 0.55)
+
+sellScoreAdj = sellScore * sellDampCombined
 
 // ============================================================
 // ─────────────── 11. FINAL SIGNAL GENERATION ────────────────
+// ── v7: 적응형 임계값 + 신뢰도 등급 + Falling Knife 차단 ────
 // ============================================================
-ACCUM_THRESHOLD = 45
-SELL_THRESHOLD  = 60  // 60점 이상만 SELL (높을수록 확실한 신호만)
+var int lastBuyBar  = -50
+var int lastSellBar = -50
+var int posState    = 0   // v8: 0=플랫, 1=롱 (상태 머신)
 
-// GATE: 반드시 저점 근처 + RSI<50 + EMA 평탄화 통과해야 BUY 발동
-// 예외: 극단적 과매도(RSI<25 + 120봉 바닥 20% + 52주 저점 15%)면 EMA 게이트 면제
-var int lastBuyBar  = -20
-var int lastSellBar = -20
-
+// === ACCUMULATION BUY ===
 extremeOversold      = rsiVal < 25 and rangePos120 < 0.20 and range52w < 15
 buyCooldownAfterSell = bar_index - lastSellBar >= 10
-accumGate = nearBottom and rsiGate and (ema50_flattening or extremeOversold) and buyCooldownAfterSell and (not isZombie)
 
-buySignalRaw  = accumGate and accumScore >= ACCUM_THRESHOLD and show_buy
-anySell       = sellScore >= SELL_THRESHOLD and show_sell
+accumGateStandard = nearBottom and rsiGate and (ema50_flattening or extremeOversold) and buyCooldownAfterSell and (not isZombie) and (not fallingKnifeActive) and enableAccumBuy and downtrendBuyOK
+highConvictionAccum = accumScore >= 70
+accumGateRelaxed = (nearBottom or rangePos120 < 0.25) and rsiGate and buyCooldownAfterSell and (not isZombie) and (not fallingKnifeActive) and enableAccumBuy and highConvictionAccum and downtrendBuyOK
 
-// 신호 중복 방지: BUY 15봉, SELL 20봉 이내 재발동 금지
-buySignal  = buySignalRaw  and (bar_index - lastBuyBar  >= 15)
-sellSignal = anySell       and (bar_index - lastSellBar >= 20)
+accumGate = accumGateStandard or accumGateRelaxed
+buyAccumRaw = accumGate and accumScore >= adaptAccumThresh and show_buy
+
+// === MOMENTUM BUY ===
+momGate = momCoreGate and (momSupportCount >= 3) and (not isZombie) and buyCooldownAfterSell and enableMomentumBuy and macroAllowMom and downtrendBuyOK
+buyMomRaw = momGate and momScore >= MOM_THRESHOLD and show_buy
+
+// === REGIME FILTER ===
+regimeAllowBuy = not enableRegimeFilter or spyAboveEma or extremeOversold
+regimeAllowMom = not enableRegimeFilter or spyAboveEma
+
+buyAccumFiltered = buyAccumRaw and regimeAllowBuy
+buyMomFiltered   = buyMomRaw and regimeAllowMom
+
+buySignalRaw = buyAccumFiltered or buyMomFiltered
+var string lastBuyStrategy = ""
+
+// === SELL ===
+// v8: 바닥권 매도 억제 강화 (저점 매도 방지)
+nearBottomSellBlock = blockSellAtBottom and ((rangePos < 0.30 and rsiVal < 42) or rsiVal < 32 or extremeOversold or (rangePos120 < 0.15 and not isBullTrend))
+anySell = sellCoreCondition and not nearBottomSellBlock and sellScoreAdj >= adaptSellThresh and show_sell
+
+// v7: 적응형 쿨다운 + v8: 상태 머신 게이팅 (깔끔한 교대 신호)
+buyAllowedByState  = not useStateMachine or posState == 0
+sellAllowedByState = not useStateMachine or posState == 1
+
+buySignal  = buySignalRaw and (bar_index - lastBuyBar  >= adaptCooldownBuy)  and buyAllowedByState  and buyLocationOK
+sellSignal = anySell      and (bar_index - lastSellBar >= adaptCooldownSell) and sellAllowedByState and sellLocationOK
 
 if buySignal
     lastBuyBar := bar_index
+    posState := 1
+    if buyAccumFiltered and buyMomFiltered
+        lastBuyStrategy := "BOTH"
+    else if buyMomFiltered
+        lastBuyStrategy := "MOM"
+    else
+        lastBuyStrategy := "ACCUM"
 if sellSignal
     lastSellBar := bar_index
+    posState := 0
+
+// ── v7: 신호 신뢰도 등급 ────────────────────────────────────
+// BUY 신뢰도 (1=SPECULATIVE, 2=STANDARD, 3=HIGH CONVICTION)
+accumConf = accumScore >= 90 ? 3 : accumScore >= 65 ? 2 : 1
+momConf   = momScore >= 70 ? 3 : momScore >= 50 ? 2 : 1
+
+var int signalConf = 0
+if buySignal
+    if lastBuyStrategy == "BOTH"
+        signalConf := math.max(accumConf, momConf)
+    else if lastBuyStrategy == "MOM"
+        signalConf := momConf
+    else
+        signalConf := accumConf
+
+// SELL 신뢰도 (1=EARLY WARNING, 2=STANDARD, 3=URGENT)
+sellConf = sellScoreAdj >= 80 ? 3 : sellScoreAdj >= 60 ? 2 : 1
+
+// ============================================================
+// ─────────────── 11b. ROLLING BACKTEST TRACKER (v7 신규) ────
+// ── 과거 신호의 N봉 후 수익률 추적 → 실시간 승률 표시 ───────
+// ============================================================
+var array<float> btEntryPrices = array.new_float(0)
+var array<int>   btEntryBars   = array.new_int(0)
+var int   btWins      = 0
+var int   btLosses    = 0
+var float btSumWinPct  = 0.0
+var float btSumLossPct = 0.0
+
+if enableBacktest and buySignal
+    array.push(btEntryPrices, close)
+    array.push(btEntryBars, bar_index)
+
+// 만기 도달한 엔트리 평가
+if enableBacktest and array.size(btEntryBars) > 0
+    while array.size(btEntryBars) > 0 and (bar_index - array.get(btEntryBars, 0)) >= btEvalBars
+        float ep = array.get(btEntryPrices, 0)
+        array.remove(btEntryPrices, 0)
+        array.remove(btEntryBars, 0)
+        float retPct = (close / ep - 1.0) * 100
+        if retPct > 0
+            btWins += 1
+            btSumWinPct += retPct
+        else
+            btLosses += 1
+            btSumLossPct += math.abs(retPct)
+
+btTotal    = btWins + btLosses
+btWinRate  = btTotal > 0 ? (btWins * 1.0 / btTotal) * 100 : na
+btAvgWin   = btWins > 0 ? btSumWinPct / btWins : na
+btAvgLoss  = btLosses > 0 ? btSumLossPct / btLosses : na
+btWLRatio  = not na(btAvgWin) and not na(btAvgLoss) and btAvgLoss > 0 ? btAvgWin / btAvgLoss : na
 
 // ============================================================
 // ─────────────── 12. STOP LOSS / TAKE PROFIT ────────────────
 // ============================================================
-atrLen   = 14
-atrVal   = ta.atr(atrLen)
-
 slBuy    = ta.lowest(low, 5) - atrVal * 0.5
 tp1Buy   = close + (close - slBuy) * 2.0
 tp2Buy   = close + (close - slBuy) * 3.0
@@ -533,11 +860,18 @@ slSell   = ta.highest(high, 5) + atrVal * 0.5
 tp1Sell  = close - (slSell - close) * 2.0
 tp2Sell  = close - (slSell - close) * 3.0
 
-// ATR 기반 트레일링 스탑
 trailStop = ta.highest(high, 10) - atrVal * trailAtrMult
 
 // ============================================================
+// ─────────────── 12b. KELLY CRITERION (v7 신규) ─────────────
+// ── Half-Kelly 기반 포지션 사이징 제안 ──────────────────────
+// ============================================================
+kellyFull = not na(btWinRate) and not na(btWLRatio) and btWLRatio > 0 ? (btWinRate / 100 - (1 - btWinRate / 100) / btWLRatio) : na
+kellyHalf = not na(kellyFull) ? math.max(kellyFull * 0.5, 0.0) * 100 : na
+
+// ============================================================
 // ─────────────── 13. VISUALIZATION ─────────────────────────
+// ── v7: 신뢰도 등급별 라벨 시각화 ──────────────────────────
 // ============================================================
 
 // ── EMAs ──────────────────────────────────────────────────
@@ -545,117 +879,60 @@ plot(ema_fast_v, color=color.new(color.aqua, 30),  title="EMA 50",  linewidth=1)
 plot(ema_slow_v, color=color.new(color.orange, 0), title="EMA 200", linewidth=2)
 plot(vwapVal,    color=color.new(color.purple, 0), title="VWAP",    linewidth=2)
 
-// ── BUY Signal ─────────────────────────────────────────────
-plotshape(buySignal,
-          title="BUY",
-          text="BUY",
-          style=shape.arrowup,
-          location=location.belowbar,
-          color=color.new(color.lime, 0),
-          textcolor=color.black,
-          size=size.huge)
+// ── BUY Signal: Accumulation ──────────────────────────────
+plotshape(buySignal and lastBuyStrategy == "ACCUM",
+          title="ACCUM BUY", style=shape.arrowup, location=location.belowbar,
+          color=color.new(color.lime, 0), size=size.huge)
 
-// ── SELL Signal ────────────────────────────────────────────
+// ── BUY Signal: Momentum ─────────────────────────────────
+plotshape(buySignal and lastBuyStrategy == "MOM",
+          title="MOM BUY", style=shape.arrowup, location=location.belowbar,
+          color=color.new(#2196F3, 0), size=size.huge)
+
+// ── BUY Signal: Dual ─────────────────────────────────────
+plotshape(buySignal and lastBuyStrategy == "BOTH",
+          title="DUAL BUY", style=shape.arrowup, location=location.belowbar,
+          color=color.new(#FFD700, 0), size=size.huge)
+
+// ── SELL Signal ──────────────────────────────────────────
 plotshape(sellSignal,
-          title="SELL",
-          text="SELL",
-          style=shape.arrowdown,
-          location=location.abovebar,
-          color=color.new(color.red, 0),
-          textcolor=color.black,
-          size=size.huge)
+          title="SELL", style=shape.arrowdown, location=location.abovebar,
+          color=color.new(color.red, 0), size=size.huge)
 
-// ── 통합 대시보드 테이블 (우상단) ────────────────────────────
-var table dash = table.new(position.top_right, 2, 48, bgcolor=color.new(color.black, 15), border_color=color.new(color.gray, 60), border_width=1, frame_color=color.gray, frame_width=1)
+// ── v7: 신뢰도 기반 레이블 ─────────────────────────────────
+if buySignal
+    confIcon = signalConf == 3 ? "🏆" : signalConf == 2 ? "⭐" : "⚡"
+    _lbl  = lastBuyStrategy == "BOTH" ? "BUY\nDUAL" : lastBuyStrategy == "MOM" ? "BUY\nMOM" : "BUY\nACCUM"
+    _lbl  := _lbl + "\n" + confIcon
+    _col  = lastBuyStrategy == "BOTH" ? color.new(#FFD700, 0) : lastBuyStrategy == "MOM" ? color.new(#2196F3, 0) : color.new(color.lime, 0)
+    _sz   = size.normal // label size fixed
+    label.new(bar_index, low, _lbl, xloc=xloc.bar_index, yloc=yloc.belowbar,
+              color=_col, textcolor=color.black, style=label.style_label_up, size=_sz)
 
-// ════ 섹션 A: 지표 대시보드 ════
-table.cell(dash, 0, 0, "INDICATOR",  text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.navy, 10))
-table.cell(dash, 1, 0, "STATUS",     text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.navy, 10))
+if sellSignal
+    sellIcon = sellConf == 3 ? "🚨" : sellConf == 2 ? "⚠️" : "💡"
+    _sellLbl = "SELL\n" + sellIcon
+    _sellSz  = size.normal // label size fixed
+    label.new(bar_index, high, _sellLbl, xloc=xloc.bar_index, yloc=yloc.abovebar,
+              color=color.new(color.red, 0), textcolor=color.black,
+              style=label.style_label_down, size=_sellSz)
 
-trendTxt = isBullTrend ? "▲ BULL" : isBearTrend ? "▼ BEAR" : "— NEUTRAL"
-trendBg  = isBullTrend ? color.new(color.lime, 20) : isBearTrend ? color.new(color.red, 20) : color.new(color.gray, 40)
-table.cell(dash, 0, 1, "Trend",    text_color=color.white, text_size=size.tiny)
-table.cell(dash, 1, 1, trendTxt,   text_color=color.white, text_size=size.tiny, bgcolor=trendBg)
+// ============================================================
+// ─────────────── 14. INSTITUTIONAL DASHBOARD ────────────────
+// ── v7: Signal Quality, Macro Risk, Performance 섹션 추가 ──
+// ── v8.1: 기준 봉(화면 오른쪽 끝)에서만 표 갱신 — 과거 시점 조회 ──
+// ============================================================
+var table dash = table.new(position.top_right, 4, 28, bgcolor=color.new(color.black, 15), border_color=color.new(color.gray, 60), border_width=1, frame_color=color.gray, frame_width=1)
 
-vwapTxt = aboveVWAP ? "Above ▲" : "Below ▼"
-vwapBg  = aboveVWAP ? color.new(color.lime, 20) : color.new(color.red, 20)
-table.cell(dash, 0, 2, "VWAP",    text_color=color.white, text_size=size.tiny)
-table.cell(dash, 1, 2, vwapTxt + " $" + str.tostring(math.round(vwapVal, 2)), text_color=color.white, text_size=size.tiny, bgcolor=vwapBg)
+// ── 대시보드 기준 봉 ─────────────────────────────────────────
+// 표(table)는 마우스 커서 위치를 읽을 수 없으므로, 화면 오른쪽 끝에 보이는 봉을 기준으로 그린다.
+// 과거로 스크롤하면 그 시점 값, 최신 봉이 화면에 보이면 최신 값. (스크롤/줌 시 스크립트 재계산)
+int  dashTargetTime = dashFollowScroll ? chart.right_visible_bar_time : na
+bool isDashBar      = na(dashTargetTime) ? barstate.islast : (time >= dashTargetTime and nz(time[1]) < dashTargetTime) or (barstate.islast and time < dashTargetTime)
 
-rsiTxt = rsiVal < rsi_os ? "OVERSOLD" : rsiVal > rsi_ob ? "OVERBOUGHT" : str.tostring(math.round(rsiVal, 1))
-rsiBg  = rsiVal < rsi_os ? color.new(color.lime, 20) : rsiVal > rsi_ob ? color.new(color.red, 20) : rsiVal < 40 ? color.new(color.teal, 30) : rsiVal > 60 ? color.new(color.orange, 30) : color.new(color.gray, 40)
-table.cell(dash, 0, 3, "RSI",     text_color=color.white, text_size=size.tiny)
-table.cell(dash, 1, 3, rsiTxt,    text_color=color.white, text_size=size.tiny, bgcolor=rsiBg)
+bgcolor(isDashBar and not barstate.islast ? color.new(color.yellow, 85) : na, title="Dashboard Bar Highlight")
 
-stochTxt = stochOS ? "OVERSOLD" : stochOB ? "OVERBOUGHT" : str.tostring(math.round(stochK, 0)) + " / " + str.tostring(math.round(stochD, 0))
-stochBg  = stochOS ? color.new(color.lime, 20) : stochOB ? color.new(color.red, 20) : color.new(color.gray, 40)
-table.cell(dash, 0, 4, "Stoch",   text_color=color.white, text_size=size.tiny)
-table.cell(dash, 1, 4, stochTxt,  text_color=color.white, text_size=size.tiny, bgcolor=stochBg)
-
-macdTxt = macdCrossUp ? "CROSS UP ▲" : macdCrossDown ? "CROSS DN ▼" : macdPositive ? "BULLISH" : macdNegative ? "BEARISH" : "FLAT"
-macdBg  = macdCrossUp ? color.new(color.lime, 10) : macdCrossDown ? color.new(color.red, 10) : macdPositive ? color.new(color.teal, 30) : macdNegative ? color.new(color.maroon, 30) : color.new(color.gray, 40)
-table.cell(dash, 0, 5, "MACD",    text_color=color.white, text_size=size.tiny)
-table.cell(dash, 1, 5, macdTxt,   text_color=color.white, text_size=size.tiny, bgcolor=macdBg)
-
-adxTxt = isStrongTrend ? "STRONG (" + str.tostring(math.round(adxVal, 0)) + ")" : isWeakTrend ? "WEAK (" + str.tostring(math.round(adxVal, 0)) + ")" : "MODERATE (" + str.tostring(math.round(adxVal, 0)) + ")"
-adxBg  = isStrongTrend ? color.new(color.blue, 20) : isWeakTrend ? color.new(color.orange, 30) : color.new(color.gray, 40)
-table.cell(dash, 0, 6, "ADX",     text_color=color.white, text_size=size.tiny)
-table.cell(dash, 1, 6, adxTxt,    text_color=color.white, text_size=size.tiny, bgcolor=adxBg)
-
-atrPct = (atrVal / close) * 100
-atrTxt = str.tostring(math.round(atrPct, 2)) + "%"
-atrBg  = atrPct > 4.0 ? color.new(color.red, 30) : atrPct > 2.0 ? color.new(color.orange, 30) : color.new(color.gray, 40)
-table.cell(dash, 0, 7, "ATR %",   text_color=color.white, text_size=size.tiny)
-table.cell(dash, 1, 7, atrTxt,    text_color=color.white, text_size=size.tiny, bgcolor=atrBg)
-
-w52Txt = str.tostring(math.round(range52w, 0)) + "%"
-w52Lbl = range52w < 25 ? "52W LOW" : range52w > 75 ? "52W HIGH" : "52W MID"
-w52Bg  = range52w < 25 ? color.new(color.lime, 20) : range52w > 75 ? color.new(color.red, 20) : color.new(color.gray, 40)
-table.cell(dash, 0, 8, "52 Week", text_color=color.white, text_size=size.tiny)
-table.cell(dash, 1, 8, w52Lbl + " (" + w52Txt + ")", text_color=color.white, text_size=size.tiny, bgcolor=w52Bg)
-
-// ── 신규: OBV ───────────────────────────────────────────────
-obvTxt = obvRising ? "ACCUM ▲" : "DISTRIB ▼"
-obvBg  = obvRising ? color.new(color.lime, 20) : color.new(color.red, 20)
-table.cell(dash, 0, 9, "OBV",    text_color=color.white, text_size=size.tiny)
-table.cell(dash, 1, 9, obvTxt,   text_color=color.white, text_size=size.tiny, bgcolor=obvBg)
-
-// ── 신규: CMF ───────────────────────────────────────────────
-cmfTxt = moneyInflow ? "INFLOW ▲ " + str.tostring(math.round(cmf20, 3)) : "OUTFLOW ▼ " + str.tostring(math.round(cmf20, 3))
-cmfBg  = moneyInflow ? color.new(color.lime, 20) : color.new(color.red, 20)
-table.cell(dash, 0, 10, "CMF",    text_color=color.white, text_size=size.tiny)
-table.cell(dash, 1, 10, cmfTxt,   text_color=color.white, text_size=size.tiny, bgcolor=cmfBg)
-
-// ── 배당 수익률 ───────────────────────────────────────────
-yieldTxt = (na(divYield) or divYield == 0) ? "N/A" : str.tostring(math.round(divYield, 2)) + "%"
-yieldBg  = isHighYield ? color.new(color.lime, 10) : color.new(color.gray, 40)
-table.cell(dash, 0, 11, "Div Yield",  text_color=color.white, text_size=size.tiny)
-table.cell(dash, 1, 11, yieldTxt,      text_color=color.white, text_size=size.tiny, bgcolor=yieldBg)
-
-// ── 배당 성향 ───────────────────────────────────────────
-payoutTxt = (na(payoutRatio) or payoutRatio == 0) ? "N/A" : str.tostring(math.round(payoutRatio, 1)) + "%"
-payoutBg  = isDivTrap ? color.new(color.red, 20) : color.new(color.gray, 40)
-table.cell(dash, 0, 12, "Payout", text_color=color.white, text_size=size.tiny)
-table.cell(dash, 1, 12, payoutTxt, text_color=color.white, text_size=size.tiny, bgcolor=payoutBg)
-
-// ════ 섹션 A1.5: 기업 건강 체크 ════
-healthLbl = isZombie ? "💩 ZOMBIE" : healthScore == 4 ? "🟢 HEALTHY" : healthScore == 3 ? "🟡 FAIR" : "🟠 WEAK"
-healthBg  = isZombie ? color.new(color.red, 0) : healthScore == 4 ? color.new(color.lime, 20) : healthScore == 3 ? color.new(color.yellow, 20) : color.new(color.orange, 20)
-table.cell(dash, 0, 13, "🏥 HEALTH", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.navy, 10))
-table.cell(dash, 1, 13, healthLbl + " (" + str.tostring(healthScore) + "/4)", text_color=color.white, text_size=size.tiny, bgcolor=healthBg)
-
-// ── ACCUM / SELL 스코어 ─────────────────────────────────────
-buySig = buySignal ? "▲ BUY" : isZombie ? "🚫 ZOMBIE" : str.tostring(math.round(accumScore, 0)) + " / " + str.tostring(ACCUM_THRESHOLD)
-buyBg  = buySignal ? color.new(color.lime, 10) : isZombie ? color.new(color.red, 0) : nearBottom ? color.new(color.teal, 30) : color.new(color.gray, 50)
-table.cell(dash, 0, 14, "ACCUM",    text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.navy, 20))
-table.cell(dash, 1, 14, buySig,     text_color=color.white, text_size=size.tiny, bgcolor=buyBg)
-
-sellSig = sellSignal ? "▼ SELL" : str.tostring(math.round(sellScore, 0)) + " / " + str.tostring(SELL_THRESHOLD)
-sellBg  = sellSignal ? color.new(color.red, 10) : color.new(color.gray, 50)
-table.cell(dash, 0, 15, "SELL",     text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.navy, 20))
-table.cell(dash, 1, 15, sellSig,    text_color=color.white, text_size=size.tiny, bgcolor=sellBg)
-
-// ════ 섹션 B: 골든 셋업 체크리스트 ════
+// ── 골든 셋업 조건 (v7: 15개) — 데이터 창에서도 쓰므로 전역 계산 ──
 c1 = belowVWAP
 c2 = rsiVal < 40
 c3 = bbPctB < 0.2
@@ -669,62 +946,308 @@ c10 = moneyInflow
 c11 = not isZombie
 c12 = adSlope5 > 0
 c13 = distLow10 < 2
+c14 = not fallingKnifeActive   // v7: Falling Knife Safe
+c15 = not enableMacroFilter or macroRisk < 2  // v7: Macro OK
 
-hitCount = (c1 ? 1 : 0) + (c2 ? 1 : 0) + (c3 ? 1 : 0) + (c4 ? 1 : 0) + (c5 ? 1 : 0) + (c6 ? 1 : 0) + (c7 ? 1 : 0) + (c8 ? 1 : 0) + (c9 ? 1 : 0) + (c10 ? 1 : 0) + (c11 ? 1 : 0) + (c12 ? 1 : 0) + (c13 ? 1 : 0)
-headerBg  = hitCount >= 9 ? color.new(#FFD700, 5) : hitCount >= 7 ? color.new(color.teal, 20) : color.new(color.gray, 30)
-headerTxt = hitCount >= 9 ? "🏆 " + str.tostring(hitCount) + "/13 PRIME" : hitCount >= 7 ? "⭐ " + str.tostring(hitCount) + "/13 Watch" : str.tostring(hitCount) + "/13 Not Ready"
-
-table.cell(dash, 0, 16, "🏆 GOLDEN SETUP", text_color=color.black, text_size=size.tiny, bgcolor=headerBg)
-table.cell(dash, 1, 16, headerTxt,          text_color=color.black, text_size=size.tiny, bgcolor=headerBg)
+hitCount = (c1?1:0) + (c2?1:0) + (c3?1:0) + (c4?1:0) + (c5?1:0) + (c6?1:0) + (c7?1:0) + (c8?1:0) + (c9?1:0) + (c10?1:0) + (c11?1:0) + (c12?1:0) + (c13?1:0) + (c14?1:0) + (c15?1:0)
 
 f_chk(cond, lbl) =>
     [cond ? "✅ " + lbl : "❌ " + lbl, cond ? color.new(color.lime, 25) : color.new(color.gray, 55)]
 
-[l1, b1] = f_chk(c1, "VWAP Below")
-[l2, b2] = f_chk(c2, "RSI < 40")
-[l3, b3] = f_chk(c3, "BB %B < 20%")
-[l4, b4] = f_chk(c4, "LOW Zone 25%")
-[l5, b5] = f_chk(c5, "52W Low 30%")
-[l6, b6] = f_chk(c6, "Stoch Oversold")
-[l7, b7] = f_chk(c7, "Bullish Div")
-[l8, b8] = f_chk(c8, "Vol Dry/Climax")
-[l9, b9] = f_chk(c9, "OBV Accum")
-[l10, b10] = f_chk(c10, "CMF Inflow")
-[l11, b11] = f_chk(c11, "Healthy Co.")
-[l12, b12] = f_chk(c12, "A/D Inflow")
-[l13, b13] = f_chk(c13, "10D Bottom")
+f_factorCell(float val) =>
+    txt = str.tostring(math.round(val * 100, 0)) + "%"
+    bg  = val > 0.3 ? color.new(color.lime, 20) : val > 0 ? color.new(color.teal, 35) : val > -0.3 ? color.new(color.orange, 35) : color.new(color.red, 25)
+    [txt, bg]
 
-table.cell(dash, 0, 17, l1, text_color=color.white, text_size=size.tiny, bgcolor=b1)
-table.cell(dash, 1, 17, "",  text_color=color.white, text_size=size.tiny, bgcolor=b1)
-table.cell(dash, 0, 18, l2, text_color=color.white, text_size=size.tiny, bgcolor=b2)
-table.cell(dash, 1, 18, "",  text_color=color.white, text_size=size.tiny, bgcolor=b2)
-table.cell(dash, 0, 19, l3, text_color=color.white, text_size=size.tiny, bgcolor=b3)
-table.cell(dash, 1, 19, "",  text_color=color.white, text_size=size.tiny, bgcolor=b3)
-table.cell(dash, 0, 20, l4, text_color=color.white, text_size=size.tiny, bgcolor=b4)
-table.cell(dash, 1, 20, "",  text_color=color.white, text_size=size.tiny, bgcolor=b4)
-table.cell(dash, 0, 21, l5, text_color=color.white, text_size=size.tiny, bgcolor=b5)
-table.cell(dash, 1, 21, "",  text_color=color.white, text_size=size.tiny, bgcolor=b5)
-table.cell(dash, 0, 22, l6, text_color=color.white, text_size=size.tiny, bgcolor=b6)
-table.cell(dash, 1, 22, "",  text_color=color.white, text_size=size.tiny, bgcolor=b6)
-table.cell(dash, 0, 23, l7, text_color=color.white, text_size=size.tiny, bgcolor=b7)
-table.cell(dash, 1, 23, "",  text_color=color.white, text_size=size.tiny, bgcolor=b7)
-table.cell(dash, 0, 24, l8, text_color=color.white, text_size=size.tiny, bgcolor=b8)
-table.cell(dash, 1, 24, "",  text_color=color.white, text_size=size.tiny, bgcolor=b8)
-table.cell(dash, 0, 25, l9, text_color=color.white, text_size=size.tiny, bgcolor=b9)
-table.cell(dash, 1, 25, "",  text_color=color.white, text_size=size.tiny, bgcolor=b9)
-table.cell(dash, 0, 26, l10, text_color=color.white, text_size=size.tiny, bgcolor=b10)
-table.cell(dash, 1, 26, "",  text_color=color.white, text_size=size.tiny, bgcolor=b10)
-table.cell(dash, 0, 27, l11, text_color=color.white, text_size=size.tiny, bgcolor=b11)
-table.cell(dash, 1, 27, "",  text_color=color.white, text_size=size.tiny, bgcolor=b11)
-table.cell(dash, 0, 28, l12, text_color=color.white, text_size=size.tiny, bgcolor=b12)
-table.cell(dash, 1, 28, "",  text_color=color.white, text_size=size.tiny, bgcolor=b12)
-table.cell(dash, 0, 29, l13, text_color=color.white, text_size=size.tiny, bgcolor=b13)
-table.cell(dash, 1, 29, "",  text_color=color.white, text_size=size.tiny, bgcolor=b13)
+// 표는 기준 봉에서만 갱신 (기존: 매 봉마다 전체 셀 갱신)
+if isDashBar
+    // ════ 좌측 열 (Col 0, 1) ════
+    // ════ 섹션 A: ACTION + SCORES ════
+    actionTxt = buySignal ? "▲ BUY" : sellSignal ? "▼ SELL" : "— HOLD"
+    actionBg  = buySignal ? color.new(color.lime, 0) : sellSignal ? color.new(color.red, 0) : color.new(color.gray, 30)
+    table.cell(dash, 0, 0, "🎯 ACTION", text_color=color.white, text_size=size.tiny, bgcolor=actionBg)
+    table.cell(dash, 1, 0, "SCORE",     text_color=color.white, text_size=size.tiny, bgcolor=actionBg)
+
+    accumScoreTxt = str.tostring(math.round(accumScore, 0)) + " / " + str.tostring(adaptAccumThresh)
+    table.cell(dash, 0, 1, "ACCUM SCORE", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 1, accumScoreTxt,  text_color=color.white, text_size=size.tiny, bgcolor=nearBottom ? color.new(color.teal, 30) : color.new(color.gray, 50))
+
+    healthLbl = isZombie ? "💩 ZOMBIE" : healthScore == 4 ? "🟢 HEALTHY" : healthScore == 3 ? "🟡 FAIR" : "🟠 WEAK"
+    healthBg  = isZombie ? color.new(color.red, 0) : healthScore == 4 ? color.new(color.lime, 20) : healthScore == 3 ? color.new(color.yellow, 20) : color.new(color.orange, 20)
+    table.cell(dash, 0, 2, "🏥 HEALTH", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.navy, 10))
+    table.cell(dash, 1, 2, healthLbl,    text_color=color.white, text_size=size.tiny, bgcolor=healthBg)
+
+    // ════ 섹션 A1: 기술 지표 ════
+    table.cell(dash, 0, 3, "INDICATOR",  text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.navy, 10))
+    table.cell(dash, 1, 3, "STATUS",     text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.navy, 10))
+
+    trendTxt = isBullTrend ? "▲ BULL" : isBearTrend ? "▼ BEAR" : "— NEUTRAL"
+    trendBg  = isBullTrend ? color.new(color.lime, 20) : isBearTrend ? color.new(color.red, 20) : color.new(color.gray, 40)
+    table.cell(dash, 0, 4, "Trend",    text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 4, trendTxt,   text_color=color.white, text_size=size.tiny, bgcolor=trendBg)
+
+    rsiTxt = rsiVal < rsi_os ? "OVERSOLD" : rsiVal > rsi_ob ? "OVERBOUGHT" : str.tostring(math.round(rsiVal, 1))
+    rsiBg  = rsiVal < rsi_os ? color.new(color.lime, 20) : rsiVal > rsi_ob ? color.new(color.red, 20) : rsiVal < 40 ? color.new(color.teal, 30) : rsiVal > 60 ? color.new(color.orange, 30) : color.new(color.gray, 40)
+    table.cell(dash, 0, 5, "RSI",     text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 5, rsiTxt,    text_color=color.white, text_size=size.tiny, bgcolor=rsiBg)
+
+    stochTxt = stochOS ? "OVERSOLD" : stochOB ? "OVERBOUGHT" : str.tostring(math.round(stochK, 0)) + " / " + str.tostring(math.round(stochD, 0))
+    stochBg  = stochOS ? color.new(color.lime, 20) : stochOB ? color.new(color.red, 20) : color.new(color.gray, 40)
+    table.cell(dash, 0, 6, "Stoch",   text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 6, stochTxt,  text_color=color.white, text_size=size.tiny, bgcolor=stochBg)
+
+    macdTxt = macdCrossUp ? "CROSS UP ▲" : macdCrossDown ? "CROSS DN ▼" : macdPositive ? "BULLISH" : macdNegative ? "BEARISH" : "FLAT"
+    macdBg  = macdCrossUp ? color.new(color.lime, 10) : macdCrossDown ? color.new(color.red, 10) : macdPositive ? color.new(color.teal, 30) : macdNegative ? color.new(color.maroon, 30) : color.new(color.gray, 40)
+    table.cell(dash, 0, 7, "MACD",    text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 7, macdTxt,   text_color=color.white, text_size=size.tiny, bgcolor=macdBg)
+
+    adxTxt = isStrongTrend ? "STRONG (" + str.tostring(math.round(adxVal, 0)) + ")" : isWeakTrend ? "WEAK (" + str.tostring(math.round(adxVal, 0)) + ")" : "MOD (" + str.tostring(math.round(adxVal, 0)) + ")"
+    adxBg  = isStrongTrend ? color.new(color.blue, 20) : isWeakTrend ? color.new(color.orange, 30) : color.new(color.gray, 40)
+    table.cell(dash, 0, 8, "ADX",     text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 8, adxTxt,    text_color=color.white, text_size=size.tiny, bgcolor=adxBg)
+
+    atrPct = (atrVal / close) * 100
+    atrTxt = str.tostring(math.round(atrPct, 2)) + "%"
+    atrBg  = atrPct > 4.0 ? color.new(color.red, 30) : atrPct > 2.0 ? color.new(color.orange, 30) : color.new(color.gray, 40)
+    table.cell(dash, 0, 9, "ATR %",   text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 9, atrTxt,    text_color=color.white, text_size=size.tiny, bgcolor=atrBg)
+
+    obvTxt = obvRising ? "ACCUM ▲" : "DISTRIB ▼"
+    obvBg  = obvRising ? color.new(color.lime, 20) : color.new(color.red, 20)
+    table.cell(dash, 0, 10, "OBV",    text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 10, obvTxt,   text_color=color.white, text_size=size.tiny, bgcolor=obvBg)
+
+    cmfTxt = moneyInflow ? "INFLOW ▲" : "OUTFLOW ▼"
+    cmfBg  = moneyInflow ? color.new(color.lime, 20) : color.new(color.red, 20)
+    table.cell(dash, 0, 11, "CMF",    text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 11, cmfTxt,   text_color=color.white, text_size=size.tiny, bgcolor=cmfBg)
+
+    yieldTxt = (na(divYield) or divYield == 0) ? "N/A" : str.tostring(math.round(divYield, 2)) + "%"
+    yieldBg  = isHighYield ? color.new(color.lime, 10) : color.new(color.gray, 40)
+    table.cell(dash, 0, 12, "Div Yield",  text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 12, yieldTxt,     text_color=color.white, text_size=size.tiny, bgcolor=yieldBg)
+
+    payoutTxt = (na(payoutRatio) or payoutRatio == 0) ? "N/A" : str.tostring(math.round(payoutRatio, 1)) + "%"
+    payoutBg  = isDivTrap ? color.new(color.red, 20) : color.new(color.gray, 40)
+    table.cell(dash, 0, 13, "Payout", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 13, payoutTxt, text_color=color.white, text_size=size.tiny, bgcolor=payoutBg)
+
+    // ════ 섹션 A2: 가격 평가 ════
+    table.cell(dash, 0, 14, "📊 PRICE VALUATION", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.navy, 10))
+    table.cell(dash, 1, 14, "STATUS",              text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.navy, 10))
+
+    posLbl = range52w > 80 ? "HIGH Zone" : range52w > 50 ? "MID Zone" : range52w > 20 ? "LOW Zone" : "DEEP LOW"
+    posBg  = range52w > 80 ? color.new(color.red, 20) : range52w > 50 ? color.new(color.yellow, 30) : range52w > 20 ? color.new(color.teal, 20) : color.new(color.lime, 10)
+    table.cell(dash, 0, 15, "Current Position", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 15, posLbl + " (" + str.tostring(math.round(range52w, 0)) + "%)", text_color=color.white, text_size=size.tiny, bgcolor=posBg)
+
+    table.cell(dash, 0, 16, "VWAP",    text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 16, (aboveVWAP ? "Above ▲" : "Below ▼") + " $" + str.tostring(math.round(vwapVal, 2)), text_color=color.white, text_size=size.tiny, bgcolor=aboveVWAP ? color.new(color.lime, 20) : color.new(color.red, 20))
+
+    w52Lbl = range52w < 25 ? "52W LOW" : range52w > 75 ? "52W HIGH" : "52W MID"
+    table.cell(dash, 0, 17, "52 Week Range",  text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 17, w52Lbl + " (" + str.tostring(math.round(range52w, 0)) + "%)", text_color=color.white, text_size=size.tiny, bgcolor=range52w < 25 ? color.new(color.lime, 20) : range52w > 75 ? color.new(color.red, 20) : color.new(color.gray, 40))
+
+    // ════ 섹션 A3: 골든 셋업 체크리스트 (v7: 15개) ════
+    headerBg  = hitCount >= 11 ? color.new(#FFD700, 5) : hitCount >= 9 ? color.new(color.teal, 20) : color.new(color.gray, 30)
+    headerTxt = hitCount >= 11 ? "🏆 " + str.tostring(hitCount) + "/15 PRIME" : hitCount >= 9 ? "⭐ " + str.tostring(hitCount) + "/15 Watch" : str.tostring(hitCount) + "/15 Not Ready"
+
+    table.cell(dash, 0, 18, "🏆 GOLDEN SETUP", text_color=color.black, text_size=size.tiny, bgcolor=headerBg)
+    table.cell(dash, 1, 18, headerTxt,          text_color=color.black, text_size=size.tiny, bgcolor=headerBg)
+
+    [l1, b1]   = f_chk(c1, "VWAP <")
+    [l2, b2]   = f_chk(c2, "RSI < 40")
+    [l3, b3]   = f_chk(c3, "BB %B <20")
+    [l4, b4]   = f_chk(c4, "Low Zone")
+    [l5, b5]   = f_chk(c5, "52W Low")
+    [l6, b6]   = f_chk(c6, "Stoch OS")
+    [l7, b7]   = f_chk(c7, "Bull Div")
+    [l8, b8]   = f_chk(c8, "Vol Dry")
+    [l9, b9]   = f_chk(c9, "OBV Up")
+    [l10, b10] = f_chk(c10, "CMF In")
+    [l11, b11] = f_chk(c11, "Healthy")
+    [l12, b12] = f_chk(c12, "A/D In")
+    [l13, b13] = f_chk(c13, "10D Bot")
+    [l14, b14] = f_chk(c14, "Knife ✓")
+    [l15, b15] = f_chk(c15, "Macro ✓")
+
+    // Col 0, 1은 좌측 열 유지
+    table.cell(dash, 0, 19, l1,  text_color=color.white, text_size=size.tiny, bgcolor=b1)
+    table.cell(dash, 1, 19, l9,  text_color=color.white, text_size=size.tiny, bgcolor=b9)
+    table.cell(dash, 0, 20, l2,  text_color=color.white, text_size=size.tiny, bgcolor=b2)
+    table.cell(dash, 1, 20, l10, text_color=color.white, text_size=size.tiny, bgcolor=b10)
+    table.cell(dash, 0, 21, l3,  text_color=color.white, text_size=size.tiny, bgcolor=b3)
+    table.cell(dash, 1, 21, l11, text_color=color.white, text_size=size.tiny, bgcolor=b11)
+    table.cell(dash, 0, 22, l4,  text_color=color.white, text_size=size.tiny, bgcolor=b4)
+    table.cell(dash, 1, 22, l12, text_color=color.white, text_size=size.tiny, bgcolor=b12)
+    table.cell(dash, 0, 23, l5,  text_color=color.white, text_size=size.tiny, bgcolor=b5)
+    table.cell(dash, 1, 23, l13, text_color=color.white, text_size=size.tiny, bgcolor=b13)
+    table.cell(dash, 0, 24, l6,  text_color=color.white, text_size=size.tiny, bgcolor=b6)
+    table.cell(dash, 1, 24, l14, text_color=color.white, text_size=size.tiny, bgcolor=b14)
+    table.cell(dash, 0, 25, l7,  text_color=color.white, text_size=size.tiny, bgcolor=b7)
+    table.cell(dash, 1, 25, l15, text_color=color.white, text_size=size.tiny, bgcolor=b15)
+    table.cell(dash, 0, 26, l8,  text_color=color.white, text_size=size.tiny, bgcolor=b8)
+    table.cell(dash, 1, 26, "",   text_color=color.white, text_size=size.tiny, bgcolor=b8)
+
+    // ════ 우측 열 (Col 2, 3) ════
+    // ════ 섹션 B: ACCUM / MOM / SELL 스코어 ════
+    buySig = buySignal and lastBuyStrategy == "ACCUM" ? "▲ BUY" : isZombie ? "🚫 ZOMBIE" : str.tostring(math.round(accumScore, 0)) + " / " + str.tostring(adaptAccumThresh)
+    buyBg  = buySignal and lastBuyStrategy == "ACCUM" ? color.new(color.lime, 10) : isZombie ? color.new(color.red, 0) : nearBottom ? color.new(color.teal, 30) : color.new(color.gray, 50)
+    table.cell(dash, 2, 0, "▲ ACCUM SCORE",  text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.navy, 20))
+    table.cell(dash, 3, 0, buySig,            text_color=color.white, text_size=size.tiny, bgcolor=buyBg)
+
+    momSig = buySignal and lastBuyStrategy == "MOM" ? "▲ BUY" : buySignal and lastBuyStrategy == "BOTH" ? "▲ DUAL" : str.tostring(math.round(momScore, 0)) + " / " + str.tostring(MOM_THRESHOLD)
+    momBg  = buySignal and (lastBuyStrategy == "MOM" or lastBuyStrategy == "BOTH") ? color.new(#2196F3, 10) : momCoreGate ? color.new(color.teal, 30) : color.new(color.gray, 50)
+    table.cell(dash, 2, 1, "▲ MOM SCORE",  text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.navy, 20))
+    table.cell(dash, 3, 1, momSig,          text_color=color.white, text_size=size.tiny, bgcolor=momBg)
+
+    dampPct = math.round(sellDampCombined * 100, 0)
+    sellSig = sellSignal ? "▼ SELL" : str.tostring(math.round(sellScoreAdj, 0)) + "(" + str.tostring(math.round(sellScore, 0)) + "×" + str.tostring(dampPct) + "%) /" + str.tostring(adaptSellThresh)
+    sellBg  = sellSignal ? color.new(color.red, 10) : earlyBearWarning ? color.new(color.red, 40) : sellCoreCondition ? color.new(color.maroon, 30) : color.new(color.gray, 50)
+    table.cell(dash, 2, 2, "▼ SELL SCORE",  text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.navy, 20))
+    table.cell(dash, 3, 2, sellSig,          text_color=color.white, text_size=size.tiny, bgcolor=sellBg)
+
+    // ════ 섹션 C: SIGNAL QUALITY (v7 신규) ════
+    table.cell(dash, 2, 3, "⚡ SIGNAL QUALITY", text_color=color.white, text_size=size.tiny, bgcolor=color.new(#4A0080, 10))
+    table.cell(dash, 3, 3, "",                   text_color=color.white, text_size=size.tiny, bgcolor=color.new(#4A0080, 10))
+
+    confTxt = buySignal ? (signalConf == 3 ? "🏆 HIGH" : signalConf == 2 ? "⭐ STANDARD" : "⚡ SPECULATIVE") : sellSignal ? (sellConf == 3 ? "🚨 URGENT" : sellConf == 2 ? "⚠️ STANDARD" : "💡 EARLY") : "—"
+    confBg  = buySignal ? (signalConf == 3 ? color.new(#FFD700, 10) : signalConf == 2 ? color.new(color.lime, 20) : color.new(color.gray, 40)) : sellSignal ? (sellConf == 3 ? color.new(color.red, 10) : color.new(color.orange, 20)) : color.new(color.gray, 50)
+    table.cell(dash, 2, 4, "Confidence",    text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 4, confTxt,         text_color=color.white, text_size=size.tiny, bgcolor=confBg)
+
+    vrBg = volRegime >= 3 ? color.new(color.red, 15) : volRegime >= 2 ? color.new(color.orange, 20) : volRegime == 1 ? color.new(color.gray, 40) : color.new(color.teal, 30)
+    table.cell(dash, 2, 5, "Vol Regime",    text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 5, volRegimeTxt,    text_color=color.white, text_size=size.tiny, bgcolor=vrBg)
+
+    threshTxt = "A:" + str.tostring(adaptAccumThresh) + " S:" + str.tostring(adaptSellThresh)
+    table.cell(dash, 2, 6, "Adapt Thresh",  text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 6, threshTxt,       text_color=color.white, text_size=size.tiny, bgcolor=volRegime >= 2 ? color.new(color.orange, 30) : color.new(color.gray, 40))
+
+    knifeTxt = fallingKnifeActive ? "🔪 BLOCKED" : "✅ SAFE"
+    knifeBg  = fallingKnifeActive ? color.new(color.red, 10) : color.new(color.lime, 30)
+    table.cell(dash, 2, 7, "Knife Guard",   text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 7, knifeTxt,        text_color=color.white, text_size=size.tiny, bgcolor=knifeBg)
+
+    // ════ 섹션 D: MACRO RISK (v7 신규) ════
+    table.cell(dash, 2, 8, "🌍 MACRO RISK", text_color=color.white, text_size=size.tiny, bgcolor=color.new(#4A0080, 10))
+    table.cell(dash, 3, 8, "",               text_color=color.white, text_size=size.tiny, bgcolor=color.new(#4A0080, 10))
+
+    vixTxt = vixAvail ? str.tostring(math.round(vixClose, 1)) + (vixSpike ? " ⚠️SPIKE" : vixExtreme ? " 🔴FEAR" : "") : "N/A"
+    vixBg  = vixExtreme ? color.new(color.red, 10) : vixSpike ? color.new(color.orange, 20) : color.new(color.gray, 40)
+    table.cell(dash, 2, 9, "VIX",           text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 9, vixTxt,          text_color=color.white, text_size=size.tiny, bgcolor=vixBg)
+
+    dxyTxt = dxyAvail ? str.tostring(math.round(dxyClose, 1)) + (dxyStrong ? " ▲STRONG" : " ▼WEAK") : "N/A"
+    dxyBg  = dxyStrong ? color.new(color.orange, 20) : dxyAvail ? color.new(color.teal, 30) : color.new(color.gray, 40)
+    table.cell(dash, 2, 10, "DXY",           text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 10, dxyTxt,          text_color=color.white, text_size=size.tiny, bgcolor=dxyBg)
+
+    macroTxt = str.tostring(macroRisk) + "/3"
+    macroBg  = macroRisk >= 3 ? color.new(color.red, 10) : macroRisk >= 2 ? color.new(color.orange, 20) : macroRisk >= 1 ? color.new(color.yellow, 30) : color.new(color.lime, 30)
+    table.cell(dash, 2, 11, "Risk Level",    text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 11, macroTxt,        text_color=color.white, text_size=size.tiny, bgcolor=macroBg)
+
+    // ════ 섹션 E: ALPHA MODEL ════
+    table.cell(dash, 2, 12, "📈 ALPHA MODEL", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.navy, 10))
+    alphaTxt = str.tostring(math.round(alphaScore * 100, 1)) + "%"
+    alphaBg  = alphaScore > 0.3 ? color.new(color.lime, 10) : alphaScore > 0 ? color.new(color.teal, 30) : alphaScore > -0.3 ? color.new(color.orange, 30) : color.new(color.red, 20)
+    table.cell(dash, 3, 12, alphaTxt,   text_color=color.white, text_size=size.tiny, bgcolor=alphaBg)
+
+    [fmTxt, fmBg] = f_factorCell(factorMomentum)
+    [ftTxt, ftBg] = f_factorCell(factorTrend)
+    [fvTxt, fvBg] = f_factorCell(factorVolume)
+    [flTxt, flBg] = f_factorCell(factorVolatility)
+    [frTxt, frBg] = f_factorCell(factorMeanRev)
+
+    table.cell(dash, 2, 13, "Momentum",   text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 13, fmTxt,        text_color=color.white, text_size=size.tiny, bgcolor=fmBg)
+    table.cell(dash, 2, 14, "Trend",      text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 14, ftTxt,        text_color=color.white, text_size=size.tiny, bgcolor=ftBg)
+    table.cell(dash, 2, 15, "Volume",     text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 15, fvTxt,        text_color=color.white, text_size=size.tiny, bgcolor=fvBg)
+    table.cell(dash, 2, 16, "Volatility", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 16, flTxt,        text_color=color.white, text_size=size.tiny, bgcolor=flBg)
+    table.cell(dash, 2, 17, "Mean Rev",   text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 17, frTxt,        text_color=color.white, text_size=size.tiny, bgcolor=frBg)
+
+    // ════ 섹션 F: PERFORMANCE (v7 신규) ════
+    table.cell(dash, 2, 18, "📊 PERFORMANCE", text_color=color.white, text_size=size.tiny, bgcolor=color.new(#4A0080, 10))
+    table.cell(dash, 3, 18, str.tostring(btEvalBars) + "bar",  text_color=color.white, text_size=size.tiny, bgcolor=color.new(#4A0080, 10))
+
+    wrTxt = na(btWinRate) ? "—" : str.tostring(math.round(btWinRate, 0)) + "% (" + str.tostring(btWins) + "/" + str.tostring(btTotal) + ")"
+    wrBg  = na(btWinRate) ? color.new(color.gray, 40) : btWinRate >= 60 ? color.new(color.lime, 20) : btWinRate >= 40 ? color.new(color.yellow, 30) : color.new(color.red, 20)
+    table.cell(dash, 2, 19, "Win Rate",      text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 19, wrTxt,           text_color=color.white, text_size=size.tiny, bgcolor=wrBg)
+
+    wlTxt = na(btWLRatio) ? "—" : str.tostring(math.round(btWLRatio, 2)) + "x"
+    wlBg  = na(btWLRatio) ? color.new(color.gray, 40) : btWLRatio >= 1.5 ? color.new(color.lime, 20) : btWLRatio >= 1.0 ? color.new(color.yellow, 30) : color.new(color.red, 20)
+    table.cell(dash, 2, 20, "W/L Ratio",     text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 20, wlTxt,           text_color=color.white, text_size=size.tiny, bgcolor=wlBg)
+
+    kellyTxt = na(kellyHalf) ? "—" : str.tostring(math.round(kellyHalf, 1)) + "%"
+    kellyBg  = na(kellyHalf) ? color.new(color.gray, 40) : kellyHalf > 15 ? color.new(color.lime, 20) : kellyHalf > 5 ? color.new(color.teal, 30) : color.new(color.gray, 40)
+    table.cell(dash, 2, 21, "Kelly Size",    text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 21, kellyTxt,        text_color=color.white, text_size=size.tiny, bgcolor=kellyBg)
+
+    // ════ 섹션 G: 시장 체제 ════
+    regimeTxt = isBullRegime ? "▲ BULL (SPY>EMA200)" : isBearRegime ? "▼ BEAR (SPY<EMA200)" : spyAboveEma ? "— NEUTRAL (SPY>EMA200)" : "— CAUTION (SPY<EMA200)"
+    regimeBg  = isBullRegime ? color.new(color.lime, 20) : isBearRegime ? color.new(color.red, 20) : spyAboveEma ? color.new(color.teal, 30) : color.new(color.orange, 30)
+    table.cell(dash, 2, 22, "🌍 REGIME",  text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.navy, 10))
+    table.cell(dash, 3, 22, regimeTxt,     text_color=color.white, text_size=size.tiny, bgcolor=regimeBg)
+
+    // ════ 섹션 H: WALL ST ENGINE (v8) — 저점/고점 존 ════
+    locZoneTxt = inBuyZone ? "🟢 BUY ZONE" : inSellZone ? "🔴 SELL ZONE" : "⚪ NEUTRAL"
+    locZoneBg  = inBuyZone ? color.new(color.lime, 20) : inSellZone ? color.new(color.red, 20) : color.new(color.gray, 40)
+    table.cell(dash, 2, 23, "📍 PRICE ZONE", text_color=color.white, text_size=size.tiny, bgcolor=color.new(#4A0080, 10))
+    table.cell(dash, 3, 23, locZoneTxt + " " + str.tostring(math.round(locScore * 100, 0)) + "%", text_color=color.white, text_size=size.tiny, bgcolor=locZoneBg)
+
+    revTxt = confirmedDowntrend ? (reversalConfirmed ? "✅ CONFIRMED" : "⏳ WAIT") : "— UPTREND OK"
+    revBg  = confirmedDowntrend ? (reversalConfirmed ? color.new(color.lime, 20) : color.new(color.orange, 25)) : color.new(color.teal, 35)
+    table.cell(dash, 2, 24, "🔄 Reversal", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 24, revTxt,        text_color=color.white, text_size=size.tiny, bgcolor=revBg)
+
+    // ════ 섹션 I: 기준 봉 (v8.1) — 표가 어느 시점 값인지 표시 ════
+    asOfTxt = str.format_time(time, timeframe.isintraday ? "yyyy-MM-dd HH:mm" : "yyyy-MM-dd", syminfo.timezone)
+    viewTxt = barstate.islast ? "● LATEST" : "⏪ " + str.tostring(last_bar_index - bar_index) + " bars ago"
+    viewBg  = barstate.islast ? color.new(color.teal, 30) : color.new(color.orange, 10)
+    table.cell(dash, 2, 25, "📅 AS OF", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.navy, 10))
+    table.cell(dash, 3, 25, asOfTxt,    text_color=color.white, text_size=size.tiny, bgcolor=viewBg)
+    table.cell(dash, 2, 26, "View",     text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 26, viewTxt,    text_color=color.white, text_size=size.tiny, bgcolor=viewBg)
+
+// ============================================================
+// ─────────────── 14b. DATA WINDOW (커서 위치 봉의 값) ────────
+// ── 표는 커서를 따라갈 수 없으므로 핵심 수치를 데이터 창에 노출 ──
+// ── 우측 사이드바 › 데이터 창: 마우스를 올린 봉의 값이 표시됨 ──
+// ============================================================
+dwDisplay = showDataWindow ? display.data_window : display.none
+plot(accumScore,        "Accum Score",      color=color.teal,   display=dwDisplay, editable=false, format=format.price, precision=0)
+plot(adaptAccumThresh,  "Accum Threshold",  color=color.teal,   display=dwDisplay, editable=false, format=format.price, precision=0)
+plot(momScore,          "Mom Score",        color=color.blue,   display=dwDisplay, editable=false, format=format.price, precision=0)
+plot(sellScoreAdj,      "Sell Score (Adj)", color=color.red,    display=dwDisplay, editable=false, format=format.price, precision=0)
+plot(adaptSellThresh,   "Sell Threshold",   color=color.red,    display=dwDisplay, editable=false, format=format.price, precision=0)
+plot(hitCount,          "Golden Setup /15", color=color.orange, display=dwDisplay, editable=false, format=format.price, precision=0)
+plot(locScore * 100,    "Price Zone %",     color=color.gray,   display=dwDisplay, editable=false, format=format.price, precision=0)
+plot(range52w,          "52W Position %",   color=color.gray,   display=dwDisplay, editable=false, format=format.price, precision=0)
+plot(rsiVal,            "RSI",              color=color.gray,   display=dwDisplay, editable=false, format=format.price, precision=1)
+plot(stochK,            "Stoch %K",         color=color.gray,   display=dwDisplay, editable=false, format=format.price, precision=0)
+plot(adxVal,            "ADX",              color=color.gray,   display=dwDisplay, editable=false, format=format.price, precision=0)
+plot(atrPctVal * 100,   "ATR %",            color=color.gray,   display=dwDisplay, editable=false, format=format.price, precision=2)
+plot(cmf20,             "CMF",              color=color.gray,   display=dwDisplay, editable=false, format=format.price, precision=3)
+plot(alphaScore * 100,  "Alpha Score %",    color=color.blue,   display=dwDisplay, editable=false, format=format.price, precision=1)
+plot(macroRisk,         "Macro Risk /3",    color=color.orange, display=dwDisplay, editable=false, format=format.price, precision=0)
+plot(btWinRate,         "Win Rate %",       color=color.gray,   display=dwDisplay, editable=false, format=format.price, precision=0)
 
 // ============================================================
 // ─────────────── 15. ALERTS ─────────────────────────────────
+// ── v7: 신뢰도 등급 포함 ────────────────────────────────────
 // ============================================================
-alertcondition(buySignal,  title="▲ BUY Signal",  message="ACCUMULATION BUY - Bottom Zone Entry. Ticker: {{ticker}} | Price: {{close}} | Time: {{time}}")
-alertcondition(sellSignal, title="▼ SELL Signal", message="INSTITUTIONAL SELL SIGNAL. Ticker: {{ticker}} | Price: {{close}} | Time: {{time}}")
+alertcondition(buySignal and lastBuyStrategy == "ACCUM", title="▲ ACCUM BUY", message="ACCUMULATION BUY - Bottom Zone Entry. Ticker: {{ticker}} | Price: {{close}} | Time: {{time}}")
+alertcondition(buySignal and lastBuyStrategy == "MOM",   title="▲ MOM BUY",   message="MOMENTUM BUY - Breakout Entry. Ticker: {{ticker}} | Price: {{close}} | Time: {{time}}")
+alertcondition(buySignal and lastBuyStrategy == "BOTH",  title="▲ DUAL BUY",  message="DUAL BUY - Both Strategies Triggered. Ticker: {{ticker}} | Price: {{close}} | Time: {{time}}")
+alertcondition(sellSignal, title="▼ SELL Signal", message="SELL SIGNAL (Trend-Dampened). Ticker: {{ticker}} | Price: {{close}} | Time: {{time}}")
 alertcondition(goldenCross, title="Golden Cross", message="GOLDEN CROSS detected. Ticker: {{ticker}} | Price: {{close}}")
 alertcondition(deathCross,  title="Death Cross",  message="DEATH CROSS detected. Ticker: {{ticker}} | Price: {{close}}")
+alertcondition(fallingKnifeActive and not fallingKnifeActive[1], title="🔪 Falling Knife", message="FALLING KNIFE detected - BUY signals blocked. Ticker: {{ticker}} | Price: {{close}}")
+alertcondition(macroRisk >= 2 and macroRisk[1] < 2, title="🌍 Macro Risk High", message="MACRO RISK elevated (VIX/DXY). Ticker: {{ticker}} | Price: {{close}} | Time: {{time}}")
