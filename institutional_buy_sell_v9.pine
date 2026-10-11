@@ -1,14 +1,17 @@
 // ============================================================
-// INSTITUTIONAL BUY & SELL v9.2 — REGIME-FIRST SIGNAL ENGINE
+// INSTITUTIONAL BUY & SELL v9.4 — REGIME-FIRST SIGNAL ENGINE
 // ============================================================
 // v9: "레짐(Stage) 먼저 → 셋업 → 트리거 → 포지션/청산" 구조로 전면 재설계
 // v9.1: REV(투매 후 V자 반전) 추가 — 저점 1~5봉 뒤 반전 봉에서 매수, 손절은 투매 저점 바로 아래
 // v9.2: 월봉 투매 판정을 로그(퍼센트) 가격으로 · 매수 보류된 바닥 반전을 ◇ BOTTOM으로 표시
+// v9.3: 0 이하로 계산된 손절을 로그(퍼센트) ATR로 다시 계산(폭락 직후 월봉) · Reversal Map(소진 저점 · HL · 확인선을 차트 선으로)
+// v9.4: Exit Mode(Trend Hold + TOP · Trend Hold · Swing) · S2(Stage 2 전환 매수) · 추세 진입 시장 필터 · 보유 구간 배경
+//       Auto는 63종목 IS/OOS 검증 결정표: 일봉 · 1h는 추세 보유, 주봉 · 월봉 · 4h · TSXV는 v9.3 매도 유지
 //  · Regime   : Weinstein Stage(30주 MA) · Faber 10개월 SMA — 타임프레임 자동 매핑
-//  · Entries  : PB 상승추세 눌림목 · BO 박스 돌파 · EARLY 투매 후 반전(소진 → Higher Low → CHoCH)
+//  · Entries  : PB 상승추세 눌림목 · BO 박스 돌파 · S2 Stage 2 전환 · EARLY 투매 후 반전(소진 → Higher Low → CHoCH)
 //               · REV 투매 후 V자 반전(투매 저점 → 반전 봉, 상위 TF 과매도 · 시장 동반 투매일 때)
 //  · Evidence : 서로 상관 없는 4기둥(Momentum · Flow · Value · RS) → 등급 🏆 4/4 · ⭐ 3/4 · ⚡ 2/4 (REV는 참고용)
-//  · Exits    : 손절 · Chandelier 트레일 · T1(2R) TRIM · TOP TRIM · 추세 붕괴 EXIT
+//  · Exits    : 손절 · 추세 붕괴 EXIT + (Swing) Chandelier 트레일 · T1(2R) TRIM · TOP TRIM / (Trend Hold) Stage 2 종료까지 보유 · TOP TRIM
 //  · Warnings : 보유 여부와 무관한 ▼ BREAKDOWN · ◆ TOP · ◇ BOTTOM(매수 보류된 바닥 반전)
 //  · Honest   : 봉 마감 확정 신호만(비재도색) · 체결은 다음 봉 시가 · 거래 단위 성과(비용 포함)
 // 전략 쌍둥이(백테스트): institutional_buy_sell_v9_strategy.pine
@@ -16,7 +19,7 @@
 //   공유 엔진 블록은 이 파일에서만 고치고 `python3 tools/sync_strategy.py` 로 복사합니다.
 // ============================================================
 //@version=6
-indicator("Institutional Buy & Sell v9.2", overlay=true, max_bars_back=600, max_labels_count=500)
+indicator("Institutional Buy & Sell v9.4", overlay=true, max_bars_back=600, max_labels_count=500)
 
 // ==== ENGINE BEGIN ====
 // 공유 엔진: 지표와 전략 파일이 같은 코드를 씁니다. 표시용 입력·plot·label·table은 이 블록에 넣지 않습니다.
@@ -30,6 +33,7 @@ enPB    = input.bool(true, "PB · Trend Pullback (상승추세 눌림목)", grou
 enBO    = input.bool(true, "BO · Base Breakout (박스 돌파)", group=grpS)
 enEA    = input.bool(true, "EARLY · Capitulation Reversal (투매 후 반전)", group=grpS)
 enREV   = input.bool(true, "REV · V-Bottom Reversal (투매 후 V자 반전)", group=grpS, tooltip="투매 저점 이후 5봉 안에 반전 봉이 나오면 매수. 손절은 투매 저점 − 0.25 ATR.\n역추세 매매라 절반 사이즈 권장. 4기둥 등급은 바닥에서 예측력이 없어 참고용으로만 표시합니다.")
+s2In    = input.string("Auto", "S2 · Stage 2 Entry (레짐 전환 매수)", options=["Auto", "On", "Off"], group=grpS, tooltip="레짐이 Stage 2(상승 추세)로 바뀐 봉에서 매수. 눌림목 · 박스 돌파를 기다리다 추세 초반을 놓치는 것을 줄입니다.\n손절은 최근 5봉 저점 − 0.25 ATR (최대 3 ATR). 등급은 참고용.\nAuto: 63종목 검증에서 이득이 확인된 타임프레임에서만 켬 (README 표)")
 
 grpR     = "🧭 Regime (Stage)"
 regTfIn  = input.string("Auto", "Regime Timeframe", options=["Auto", "Chart", "D", "W", "M"], group=grpR, tooltip="Auto: 분·시간봉 → 일봉 SMA50 / 일봉 → SMA150(≈30주) / 주봉 → SMA30 / 월봉 → SMA10\n차트보다 낮은 TF를 고르면 차트 TF로 계산합니다.")
@@ -50,9 +54,10 @@ revMktIn   = input.string("Auto", "REV Market Washout Filter", options=["Auto", 
 revMktPct  = input.float(5.0, "REV Market Drawdown ≥ %", minval=0.0, step=0.5, group=grpX)
 
 grpK         = "🛡️ Risk & Exits"
+exitModeIn   = input.string("Auto", "Exit Mode", options=["Auto", "Trend Hold + TOP", "Trend Hold", "Swing (v9.3)"], group=grpK, tooltip="Trend Hold + TOP: Stage 2가 끝날 때까지 보유, 과열(TOP)에서만 1/3씩 익절 (최대 2회)\nTrend Hold: 익절 없이 Stage 2가 끝날 때까지 보유 (수익 최대 · 낙폭 더 큼)\nSwing (v9.3): T1(+2R) 1/3 익절 + Chandelier 트레일 + TOP 익절\n세 모드 모두 초기 손절 · Stage 4 전환 청산은 그대로입니다.\nAuto: TSXV는 Swing, 그 외는 63종목 검증으로 정한 타임프레임별 모드 (README 표)")
 maxRiskAtr   = input.float(3.0, "Max Initial Risk (ATR)", minval=0.5, step=0.25, group=grpK)
-trailAtrMult = input.float(4.0, "Chandelier Trail (ATR)", minval=1.0, maxval=6.0, step=0.1, group=grpK, tooltip="진입 후 최고가 − N×ATR. +1R 도달 후 활성, TRIM 이후 1 ATR 조입니다. 기본 4.0: 일봉에서 3.0은 정상적인 Stage 2 흔들림에 자주 털려 7종목·2구간 백테스트에서 4.0이 PF를 높이고 MDD는 그대로였습니다.")
-t1R          = input.float(2.0, "T1 Target (R)", minval=0.5, step=0.25, group=grpK)
+trailAtrMult = input.float(4.0, "Chandelier Trail (ATR, Swing)", minval=1.0, maxval=6.0, step=0.1, group=grpK, tooltip="Swing 모드만: 진입 후 최고가 − N×ATR. +1R 도달 후 활성, TRIM 이후 1 ATR 조입니다. 기본 4.0: 일봉에서 3.0은 정상적인 Stage 2 흔들림에 자주 털려 7종목·2구간 백테스트에서 4.0이 PF를 높이고 MDD는 그대로였습니다.")
+t1R          = input.float(2.0, "T1 Target (R, Swing)", minval=0.5, step=0.25, group=grpK, tooltip="Swing 모드만: 진입가 + N × 초기 위험에서 1/3 지정가 익절")
 trimPct      = input.float(33.0, "Trim Size (% of position)", minval=10.0, maxval=50.0, step=1.0, group=grpK)
 blowAtr      = input.float(3.0, "TOP: Close above EMA20 (ATR)", minval=1.0, step=0.25, group=grpK)
 blowRsi      = input.float(75.0, "TOP: RSI ≥", minval=60.0, maxval=95.0, step=1.0, group=grpK)
@@ -61,6 +66,7 @@ grpQ        = "🔎 Filters"
 maxThinPct  = input.float(30.0, "Max Thin Bars % (last 50)", minval=5.0, maxval=100.0, step=5.0, group=grpQ, tooltip="거래량 0 또는 고가=저가인 봉의 비율이 이 이상이면 신규 진입을 멈춥니다. 청산은 계속 작동합니다.")
 minAdvK     = input.float(0.0, "Min Avg Daily $ Volume (K, 0 = off)", minval=0.0, step=10.0, group=grpQ)
 benchIn     = input.string("Auto", "RS Benchmark", group=grpQ, tooltip="Auto: TSXV → TSX:JX, TSX → TSX:TSX, 그 외 AMEX:SPY. 직접 입력도 가능합니다 (예: AMEX:LIT).")
+mktFiltIn   = input.string("Auto", "Trend Entry Market Filter", options=["Auto", "On", "Off"], group=grpQ, tooltip="On: 벤치마크(RS Benchmark)가 자기 장기 평균(일봉 SMA200 · 주봉 SMA40 · 월봉 SMA10 · 분/시간봉은 전일 확정 일봉 SMA200) 위일 때만 PB · BO · EARLY · S2 진입. REV는 자체 시장 조건을 그대로 씁니다.\n벤치마크 데이터가 없으면 통과.\nAuto: 63종목 검증에서 이득이 확인된 타임프레임에서만 켬")
 blockZombie = input.bool(true, "Block Zombie Companies (Fundamentals)", group=grpQ)
 useMacro    = input.bool(true, "Macro Risk (VIX/DXY) Raises Min Grade", group=grpQ)
 
@@ -154,6 +160,16 @@ mktDDd  = request.security(benchSym, mktTf, f_ddPrev(60), lookahead=barmerge.loo
 mktLen  = isWeekly ? 12 : isMonthly ? 3 : 60
 benchHi = ta.highest(benchClose, mktLen)
 mktDD   = isIntra ? mktDDd : benchHi > 0 ? benchClose / benchHi - 1 : na
+
+// 시장 상승 국면 (추세 진입 필터): 벤치마크 종가 > 자기 장기 SMA. 같은 TF는 벤치마크 자기 봉으로 계산, 분·시간봉은 전일 확정 일봉
+f_benchUpPrev(simple int len) =>
+    float u = close > ta.sma(close, len) ? 1.0 : 0.0
+    u[1]
+mktUpLen = isWeekly ? 40 : isMonthly ? 10 : 200
+mktUpD   = request.security(benchSym, "D", f_benchUpPrev(200), lookahead=barmerge.lookahead_on, ignore_invalid_symbol=true)
+mktUpTf  = request.security(benchSym, timeframe.period, close > ta.sma(close, mktUpLen) ? 1.0 : 0.0, ignore_invalid_symbol=true)
+mktUpF   = isIntra ? mktUpD : mktUpTf
+mktUp    = na(mktUpF) or mktUpF > 0.5
 
 // 상위 TF 과매도 (REV 필터): 일봉 → 주봉 · 분/시간봉 → 일봉. 완성된 봉 [1]·[2] 중 저가의 EMA20 대비 최대 이격(ATR)
 f_htfStretch() =>
@@ -377,13 +393,41 @@ permEA   = enEA and (sigMode == "Aggressive" ? regStage != 0 : sigMode == "Balan
 permREV  = enREV and sigMode != "Conservative" and regStage != 0
 canEnter = dataOK and not (blockZombie and isZombie)
 
+// Exit Mode · S2 · 시장 필터. Auto = v9.4 검증 결정표 (63종목 IS/OOS · 장중 46종목 앞/뒤 1년, README)
+//   채택 규칙(미리 고정): v9.3보다 PF와 구간 점수가 두 기간 모두 좋고, 종목 개선 > 악화, MDD 중앙값 악화 5%p 이내
+//   통과: 일봉 = Trend Hold + TOP · S2 · 시장 필터 / 1h = Trend Hold + TOP. 주봉 · 월봉 · 4h는 통과 조합 없음 → v9.3
+//   검증한 TF는 1h · 4h · 일 · 주 · 월. 1h 이하 분봉은 1h, 1h 초과 시간봉은 4h 결과를 따름
+//   TSXV 주니어: 사용자 결정으로 Swing(v9.3) 유지 (주봉은 시장 필터 조합이 규칙을 통과 — README)
+isJunior   = syminfo.prefix == "TSXV"
+autoExit   = isJunior ? "Swing (v9.3)" : isDaily or (isIntra and tfSec <= 3600) ? "Trend Hold + TOP" : "Swing (v9.3)"
+autoS2     = not isJunior and isDaily
+autoMktF   = not isJunior and isDaily
+exitMode   = exitModeIn == "Auto" ? autoExit : exitModeIn
+useSwing   = exitMode == "Swing (v9.3)"
+useTopTrim = exitMode != "Trend Hold"
+useS2      = s2In == "On" or (s2In == "Auto" and autoS2)
+useMktF    = mktFiltIn == "On" or (mktFiltIn == "Auto" and autoMktF)
+mktGate    = not useMktF or mktUp
+// S2: 레짐이 Stage 2로 바뀐 봉 (분·시간봉은 일봉 레짐이 바뀐 뒤 첫 봉)
+s2Trig     = regStage == 2 and regPrev != 2
+
 // ============================================================
 // ─────────────── E4. POSITION STATE MACHINE ─────────────────
 // ── FLAT → BUY → [TRIM] → EXIT → FLAT · 포지션 중 추가 BUY 없음 ──
 // ── 신호는 봉 마감 확정 시에만, 체결은 다음 봉 시가 (브로커 에뮬레이터와 동일) ──
+// ── 청산: 초기 손절 · Stage 4 전환은 모든 모드. Swing = + T1 · Chandelier 트레일 · TOP 익절
+// ──       Trend Hold(+TOP) = 보유 중 Stage 2를 한 번 본 뒤 Stage 2가 끝나면 EXIT·Stage (트레일 · T1 없음)
 // ============================================================
 trimFrac = trimPct / 100.0
 topCond  = (close - ema20 >= blowAtr * atrVal and rsiVal >= blowRsi) or bearDivPivot
+
+// 초기 손절 = 구조 저점 sp − k ATR, 기준가 ref 대비 최대 maxRiskAtr · 최소 0.5 ATR 거리
+// 폭락 직후 월봉처럼 ATR(14)이 가격보다 커서 0 이하가 나오면 같은 규칙을 로그(퍼센트) ATR로 다시 계산
+//   (NEO 월봉 2013-09 REV: 진입 0.90 · ATR 1.92 → 손절 −0.18 = 손절 없음 + 차트 가격축이 음수까지 늘어남)
+//   63종목에서 0 이하 손절은 월봉 REV 6건뿐 — 일봉·주봉·분봉 결과는 그대로
+f_stopLvl(float sp, float k, float ref) =>
+    float s = math.min(math.max(sp - k * atrVal, ref - maxRiskAtr * atrVal), ref - 0.5 * atrVal)
+    s > 0 or na(lgAtr) ? s : math.min(math.max(sp * math.exp(-k * lgAtr), ref * math.exp(-maxRiskAtr * lgAtr)), ref * math.exp(-0.5 * lgAtr))
 
 var int    pos         = 0
 var bool   pendBuy     = false
@@ -408,6 +452,7 @@ var float  tradeCost   = 0.0
 var bool   topArmed    = true
 var int    lastExitBar = -1
 var string exitWhy     = ""
+var bool   seenS2      = false
 
 // 성과 누적
 var int    nTrades       = 0
@@ -432,6 +477,8 @@ var int    nEA           = 0
 var int    wEA           = 0
 var int    nRV           = 0
 var int    wRV           = 0
+var int    nS2           = 0
+var int    wS2           = 0
 
 // 이번 봉 이벤트
 bool   evBuy     = false
@@ -467,6 +514,9 @@ if pendExit and pos == 1
     else if sigType == "REV"
         nRV += 1
         wRV += tr > 0 ? 1 : 0
+    else if sigType == "S2"
+        nS2 += 1
+        wS2 += tr > 0 ? 1 : 0
     else
         nEA += 1
         wEA += tr > 0 ? 1 : 0
@@ -482,14 +532,16 @@ if pendTrim and pos == 1
 
 if pendBuy and pos == 0
     float atrPrev = nz(atrVal[1], atrVal)
+    float fbStop  = open - 0.5 * atrPrev
     entryPx   := open
     entryBar  := bar_index
-    stopPx    := planStop < open ? planStop : open - 0.5 * atrPrev
+    stopPx    := planStop < open ? planStop : fbStop > 0 ? fbStop : open * math.exp(-0.5 * nz(lgAtr[1], lgAtr))
     riskR     := entryPx - stopPx
     t1Px      := entryPx + t1R * riskR
     hiSince   := high
     trailOn   := false
     t1Done    := false
+    seenS2    := false
     trims     := 0
     remFrac   := 1.0
     realized  := 0.0
@@ -501,23 +553,26 @@ if pendBuy and pos == 0
         bhStart       := open
         bhPeak        := open
 
-// 2) T1 지정가 부분 익절 (진입 다음 봉부터, 시가 갭 위면 시가 체결)
+// 2) T1 지정가 부분 익절 (Swing만, 진입 다음 봉부터, 시가 갭 위면 시가 체결)
 canTrim = remFrac - trimFrac >= 0.15
-if pos == 1 and not t1Done and trims < 2 and canTrim and bar_index > entryBar and high >= t1Px
+if useSwing and pos == 1 and not t1Done and trims < 2 and canTrim and bar_index > entryBar and high >= t1Px
     realized += trimFrac * (math.max(open, t1Px) / entryPx - 1.0)
     remFrac  -= trimFrac
     trims    += 1
     t1Done   := true
     evT1     := true
 
-// 3) Chandelier 트레일: +1R 도달 후 활성, TRIM 이후 1 ATR 조임, 절대 내려가지 않음
+// 3) Chandelier 트레일 (Swing만): +1R 도달 후 활성, TRIM 이후 1 ATR 조임, 절대 내려가지 않음
+//    Trend Hold: 보유 중 Stage 2를 확인했는지 기록 (이후 Stage 2가 끝나면 청산)
 if pos == 1
     hiSince := math.max(hiSince, high)
-    if not trailOn and hiSince >= entryPx + riskR
+    if useSwing and not trailOn and hiSince >= entryPx + riskR
         trailOn := true
     if trailOn
         float mult = trims > 0 ? math.max(trailAtrMult - 1.0, 1.5) : trailAtrMult
         stopPx := math.max(stopPx, hiSince - mult * atrVal)
+    if regStage == 2
+        seenS2 := true
     barsInPos += 1
 
 // 4)~7) 봉 마감 확정 시 판단
@@ -526,43 +581,49 @@ if barstate.isconfirmed
     if pos == 1 and not pendExit
         bool stopHit  = close < stopPx
         bool trendBrk = regStage == 4 and regPrev != 4
-        if stopHit or trendBrk
+        bool stageEnd = not useSwing and seenS2 and regStage != 2
+        if stopHit or trendBrk or stageEnd
             pendExit    := true
             evExit      := true
-            exitWhy     := stopHit ? (trailOn ? "Trail" : "Stop") : "Trend"
+            exitWhy     := stopHit ? (trailOn ? "Trail" : "Stop") : trendBrk ? "Trend" : "Stage"
             lastExitBar := bar_index
             exhLow      := na
             exhLowBar   := na
             exhBar      := na
             hlPrice     := na
     // 5) TOP — 과열 블로우오프 또는 피벗 약세 다이버전스, 에피소드당 1회 (EMA20 아래 종가 시 재무장)
+    //    Trend Hold(익절 없음)는 보유 중에도 ◆ TOP 정보 표시만
     if close < ema20
         topArmed := true
     if topCond and topArmed
         if pos == 1 and not pendExit
-            if trims < 2 and canTrim
+            if useTopTrim and trims < 2 and canTrim
                 pendTrim  := true
                 evTop     := true
                 topQtyPct := math.min(100.0, trimFrac / remFrac * 100.0)
+            else if not useTopTrim
+                evTopWarn := true
             topArmed := false
         else if pos == 0 and (regStage == 2 or regStage == 3)
             evTopWarn := true
             topArmed  := false
     // 6) ENTRY — FLAT에서만, 레짐 허용 + 트리거 + 최소 등급 (REV는 등급 대신 투매 · 상위 TF · 시장 조건, 등급은 참고용)
+    //    시장 필터(켜진 경우)는 추세 진입 PB · BO · EARLY · S2에만. S2는 등급 조건 없이 가장 낮은 우선순위
     if pos == 0 and not pendBuy and canEnter
-        bool goPB = permPB and pbTrig and pbTouchBar > lastExitBar and gradePB >= minGrade
-        bool goBO = permBO and boTrig and gradeBO >= minGrade
-        bool goEA = permEA and earlyTrig and gradeEA >= minGrade
+        bool goPB = permPB and pbTrig and pbTouchBar > lastExitBar and gradePB >= minGrade and mktGate
+        bool goBO = permBO and boTrig and gradeBO >= minGrade and mktGate
+        bool goEA = permEA and earlyTrig and gradeEA >= minGrade and mktGate
         bool goRV = not (goPB or goBO or goEA) and permREV and revSig and wBar >= lastExitBar
-        if goPB or goBO or goEA or goRV
-            float structStop = goPB ? pbLow - 0.25 * atrVal : goBO ? low3 - 0.5 * atrVal : goEA ? hlPrice - 0.25 * atrVal : wLow - 0.25 * atrVal
-            evType     := goPB ? "PB" : goBO ? "BO" : goEA ? "EARLY" : "REV"
-            evGrade    := goPB ? gradePB : goBO ? gradeBO : gradeEA
-            evStop     := math.min(math.max(structStop, close - maxRiskAtr * atrVal), close - 0.5 * atrVal)
+        bool goS2 = useS2 and s2Trig and mktGate and not (goPB or goBO or goEA or goRV)
+        if goPB or goBO or goEA or goRV or goS2
+            float structPx = goPB ? pbLow : goBO ? low3 : goEA ? hlPrice : goRV ? wLow : pbLow
+            evType     := goPB ? "PB" : goBO ? "BO" : goEA ? "EARLY" : goRV ? "REV" : "S2"
+            evGrade    := goPB ? gradePB : goBO or goS2 ? gradeBO : gradeEA
+            evStop     := f_stopLvl(structPx, goBO ? 0.5 : 0.25, close)
             planStop   := evStop
             sigType    := evType
             sigGrade   := evGrade
-            sigPillars := goPB ? pillPB : goBO ? pillBO : pillEA
+            sigPillars := goPB ? pillPB : goBO or goS2 ? pillBO : pillEA
             pendBuy    := true
             evBuy      := true
             if goEA or goRV
@@ -574,9 +635,9 @@ if barstate.isconfirmed
     if pos == 0 and regStage == 4 and (regPrev == 2 or regPrev == 3)
         evBreak := true
 
-// T1 주문 상태 (전략 파일의 지정가 주문과 동기화)
+// T1 주문 상태 (전략 파일의 지정가 주문과 동기화, Swing만)
 remNext  = remFrac - (pendTrim ? trimFrac : 0.0)
-t1Live   = pos == 1 and not pendExit and not t1Done and trims + (pendTrim ? 1 : 0) < 2 and remNext - trimFrac >= 0.15
+t1Live   = useSwing and pos == 1 and not pendExit and not t1Done and trims + (pendTrim ? 1 : 0) < 2 and remNext - trimFrac >= 0.15
 t1QtyPct = remNext > 0 ? math.min(100.0, trimFrac / remNext * 100.0) : 0.0
 
 // ============================================================
@@ -609,8 +670,8 @@ rvArmed    = flatReady and permREV and wIs and wLB < revWin and htfOK and mktOK 
 armedType  = pbArmed ? "PB" : boArmed ? "BO" : eaArmed ? "EARLY" : rvArmed ? "REV" : ""
 armedTrig  = pbArmed ? high : boArmed ? boxHi : eaArmed ? sh1 : rvArmed ? math.max(wHigh, high) : na
 armedGrade = pbArmed ? gradePB : boArmed ? gradeBO : eaArmed or rvArmed ? gradeEA : 0
-armedRaw   = pbArmed ? pbLow - 0.25 * atrVal : boArmed ? low3 - 0.5 * atrVal : eaArmed ? hlPrice - 0.25 * atrVal : rvArmed ? wLow - 0.25 * atrVal : na
-armedStop  = na(armedTrig) ? na : math.min(math.max(armedRaw, armedTrig - maxRiskAtr * atrVal), armedTrig - 0.5 * atrVal)
+armedSp    = pbArmed ? pbLow : boArmed ? low3 : eaArmed ? hlPrice : rvArmed ? wLow : na
+armedStop  = na(armedTrig) ? na : f_stopLvl(armedSp, boArmed ? 0.5 : 0.25, armedTrig)
 armedPills = pbArmed ? pillPB : boArmed ? pillBO : eaArmed or rvArmed ? pillEA : ""
 // ==== ENGINE END ====
 
@@ -622,9 +683,10 @@ showLabels   = input.bool(true, "Signal Labels", group=grpV)
 showWarnings = input.bool(true, "Warnings when Flat (▼ BREAKDOWN · ◆ TOP · ◇ BOTTOM)", group=grpV, tooltip="지표 매매와 무관한 정보 표시입니다.\n▼ BREAKDOWN · ◆ TOP: 다른 경로로 보유 중인 종목의 매도 타이밍\n◇ BOTTOM: 바닥 반전 패턴은 나왔지만 시장 조건(개별 하락형) · 좀비 필터로 지표가 매수하지 않은 바닥")
 labelSizeIn  = input.string("Small", "Label Size", options=["Tiny", "Small", "Normal"], group=grpV)
 showRegMA    = input.bool(true, "Regime MA", group=grpV)
-showRegBg    = input.bool(true, "Regime Background", group=grpV, tooltip="Stage 2(상승) 초록 · Stage 4(하락) 빨강. 빨간 구간에서는 PB·BO 매수가 나오지 않습니다.")
+bgModeIn     = input.string("Position Zones", "Background", options=["Position Zones", "Regime", "Off"], group=grpV, tooltip="Position Zones: 지표가 보유 중인 구간은 옅은 초록 · 보유 없이 하락 국면(Stage 4)인 구간은 옅은 빨강 → 매수 · 매도 구간이 한눈에 보입니다.\nRegime: Stage 2(상승) 초록 · Stage 4(하락) 빨강 (v9.3까지의 배경)\n빨간 구간(Stage 4)에서는 PB · BO · S2 매수가 나오지 않습니다.")
 show_sl_tp   = input.bool(true, "Trade Levels (Entry · Stop/Trail · T1)", group=grpV)
 showTrigger  = input.bool(true, "Armed Trigger Level", group=grpV)
+showRevMap   = input.bool(true, "Reversal Map (소진 저점 · HL · 확인선)", group=grpV, tooltip="대시보드 Reversal 행의 바닥 반전 진행을 차트에 선으로 그립니다. 대시보드 기준 봉 하나에서만, 보유 중이 아닐 때만 그립니다 (과거 구간을 선으로 덮지 않음).\n주황 점선 · 소진: 매도가 바닥난 흔적이 나온 저점. 이 아래 종가면 이번 반전 시도는 무효\n청록 점선 · HL: 소진 저점보다 높은 두 번째 저점\n초록 파선 · 확인선: 직전 스윙 고점. HL 뒤 이 위 종가 + EMA20 위 = ✅ CONFIRMED (쌍바닥 · 역헤드앤숄더의 넥라인과 같은 역할)\n보라 · 투매 / REV: 투매 저점과 V자 반전 트리거 (5봉 안에 트리거 위 종가)\n🔒: 그 단계가 완성돼도 지금 조건에서는 매수 신호가 나오지 않음")
 showEmas     = input.bool(false, "EMA 20 / 50", group=grpV)
 
 grpD             = "📋 Dashboard"
@@ -644,6 +706,7 @@ cOrange = #FF9800
 cRed    = #F44336
 cGray   = #9E9E9E
 cPurple = #AB47BC
+cTeal   = #26A69A
 cPanel  = #1E222D
 tGreen  = #69F0AE
 tRed    = #FF8A80
@@ -659,7 +722,8 @@ f_pct(float x) => na(x) ? "—" : (x >= 0 ? "+" : "") + str.tostring(x, "0.0") +
 f_r(float x) => na(x) ? "—" : (x >= 0 ? "+" : "") + str.tostring(x, "0.00") + "R"
 f_icon(int g) => g >= 4 ? "🏆" : g == 3 ? "⭐" : g == 2 ? "⚡" : "·"
 f_stageName(int s) => s == 1 ? "BASE" : s == 2 ? "ADVANCE" : s == 3 ? "TOP" : s == 4 ? "DECLINE" : "—"
-f_typeName(string t) => t == "PB" ? "PB · 상승추세 눌림목" : t == "BO" ? "BO · 박스 돌파" : t == "REV" ? "REV · V자 반전 (투매 저점 직후, 역추세 · 절반 사이즈 권장)" : "EARLY · 투매 후 반전 (역추세, 절반 사이즈 권장)"
+f_typeName(string t) => t == "PB" ? "PB · 상승추세 눌림목" : t == "BO" ? "BO · 박스 돌파" : t == "S2" ? "S2 · Stage 2 전환 (레짐이 상승 추세로 바뀐 봉)" : t == "REV" ? "REV · V자 반전 (투매 저점 직후, 역추세 · 절반 사이즈 권장)" : "EARLY · 투매 후 반전 (역추세, 절반 사이즈 권장)"
+f_exitTxt() => useSwing ? "T1(+" + str.tostring(t1R) + "R) 1/3 익절 · Chandelier 트레일 · TOP 익절" : "Stage 2가 끝날 때까지 보유" + (useTopTrim ? " · 과열(TOP)에서만 1/3 익절" : " (익절 없음)")
 // REV는 4기둥 등급을 진입 조건으로 쓰지 않으므로 등급 아이콘을 붙이지 않음
 f_gradeTxt(string t, int g) => t == "REV" ? "" : f_icon(g) + " " + str.tostring(g) + "/4"
 f_money(float v) =>
@@ -671,12 +735,14 @@ f_money(float v) =>
 // ============================================================
 stageCol = regStage == 2 ? cGreen : regStage == 4 ? cRed : regStage == 0 ? na : cGray
 plot(showRegMA ? regMA : na, "Regime MA", color=stageCol, linewidth=2)
-bgcolor(showRegBg ? (regStage == 2 ? color.new(cGreen, 93) : regStage == 4 ? color.new(cRed, 93) : na) : na, title="Regime Background")
+// 배경: 보유 구간(초록) · 보유 없는 하락 국면(빨강) = 지표 기준 매수 · 매도 구간
+zoneBg = bgModeIn == "Position Zones" ? (pos == 1 ? color.new(cGreen, 88) : regStage == 4 ? color.new(cRed, 93) : na) : bgModeIn == "Regime" ? (regStage == 2 ? color.new(cGreen, 93) : regStage == 4 ? color.new(cRed, 93) : na) : na
+bgcolor(zoneBg, title="Background (Position Zones / Regime)")
 plot(showEmas ? ema20 : na, "EMA 20", color=color.new(color.aqua, 20))
 plot(showEmas ? ema50 : na, "EMA 50", color=color.new(color.orange, 20))
 plot(show_sl_tp and pos == 1 ? entryPx : na, "Entry", color=color.new(cGray, 20), style=plot.style_linebr)
 plot(show_sl_tp and pos == 1 ? stopPx : na, "Stop / Trail", color=cRed, linewidth=2, style=plot.style_linebr)
-plot(show_sl_tp and pos == 1 and not t1Done ? t1Px : na, "T1 Target", color=cGreen, style=plot.style_linebr)
+plot(show_sl_tp and pos == 1 and not t1Done and useSwing ? t1Px : na, "T1 Target", color=cGreen, style=plot.style_linebr)
 plot(showTrigger and armedType != "" ? armedTrig : na, "Armed Trigger", color=cCyan, style=plot.style_circles, linewidth=1)
 
 // ============================================================
@@ -698,15 +764,16 @@ if btmWarn
 
 if barstate.isconfirmed and showLabels
     if evBuy
-        color  bCol  = evType == "PB" ? cGreen : evType == "BO" ? cBlue : evType == "REV" ? cPurple : cCyan
-        color  bTxt  = evType == "BO" or evType == "REV" ? color.white : color.black
+        color  bCol  = evType == "PB" ? cGreen : evType == "BO" ? cBlue : evType == "REV" ? cPurple : evType == "S2" ? cTeal : cCyan
+        color  bTxt  = evType == "BO" or evType == "REV" or evType == "S2" ? color.white : color.black
         float  t1Est = close + t1R * (close - evStop)
+        string bExit = useSwing ? "\nT1 ≈ " + f_px(t1Est) + " (+" + str.tostring(t1R) + "R)" : "\n청산: " + f_exitTxt()
         string bWhy  = evType == "REV" ? "\n투매 저점 " + f_px(wLow) + " (" + str.tostring(wLB) + "봉 전 · RSI " + f_num(washRsi[wLB], "0") + " · EMA20 − " + f_num(washStr[wLB], "0.0") + " ATR" + (isMonthly ? " · 로그 기준" : "") + ")\n상위 TF " + (needHtf ? "EMA20 − " + f_num(htfStr, "0.0") + " ATR ✓" : "확인 안 함 (주봉 이상)") + " · 시장 " + (useMkt ? f_pct(mktDD * 100) + " ✓" : "필터 꺼짐") + "\n4기둥(참고) " + sigPillars : "\n등급 " + f_gradeTxt(evType, evGrade) + " · " + sigPillars
-        string bTip  = f_typeName(evType) + bWhy + "\n손절 " + f_px(evStop) + " (" + f_pct((evStop / close - 1) * 100) + ")\nT1 ≈ " + f_px(t1Est) + " (+" + str.tostring(t1R) + "R)\nStage " + str.tostring(regStage) + " " + f_stageName(regStage) + "\n체결: 다음 봉 시가"
+        string bTip  = f_typeName(evType) + bWhy + "\n손절 " + f_px(evStop) + " (" + f_pct((evStop / close - 1) * 100) + ")" + bExit + "\nStage " + str.tostring(regStage) + " " + f_stageName(regStage) + " · " + exitMode + (useMktF ? " · 시장 필터 ✓" : "") + "\n체결: 다음 봉 시가"
         label.new(bar_index, low, "BUY·" + evType + (evType == "REV" ? "" : " " + f_icon(evGrade)), yloc=yloc.belowbar, style=label.style_label_up, color=bCol, textcolor=bTxt, size=lblSize, tooltip=bTip)
     if showWarnings and btmWarn
         string bwWhy = btmBlockMkt ? btmWhy + " (−" + str.tostring(revMktPct) + "% 미달 · 시장은 멀쩡한데 종목만 빠진 개별 하락형)" : "재무 부실(좀비) 필터"
-        string bwTip = "바닥 반전 패턴 — 지표는 매수 보류 (정보용)\n투매 저점 " + f_px(wLow) + " (" + str.tostring(wLB) + "봉 전) → 반전 봉 ✓ · 상위 TF 과매도 ✓\n보류 이유: " + bwWhy + "\n과거 같은 유형(시장은 멀쩡한데 종목만 투매 후 반전)은 63종목 평균 본전 수준이라 매수 신호로 쓰지 않습니다.\n직접 판단한다면 절반 이하 사이즈 · 손절은 투매 저점 아래 " + f_px(wLow - 0.25 * atrVal)
+        string bwTip = "바닥 반전 패턴 — 지표는 매수 보류 (정보용)\n투매 저점 " + f_px(wLow) + " (" + str.tostring(wLB) + "봉 전) → 반전 봉 ✓ · 상위 TF 과매도 ✓\n보류 이유: " + bwWhy + "\n과거 같은 유형(시장은 멀쩡한데 종목만 투매 후 반전)은 63종목 평균 본전 수준이라 매수 신호로 쓰지 않습니다.\n직접 판단한다면 절반 이하 사이즈 · 손절 " + f_px(f_stopLvl(wLow, 0.25, close)) + " (BUY·REV와 같은 규칙: 투매 저점 − 0.25 ATR)"
         label.new(bar_index, low, "◇ BOTTOM", yloc=yloc.belowbar, style=label.style_label_up, color=color.new(cPurple, 55), textcolor=color.white, size=lblSize, tooltip=bwTip)
     string upTxt = ""
     string upTip = ""
@@ -722,7 +789,7 @@ if barstate.isconfirmed and showLabels
         upCol := cOrange
     if evExit
         upTxt := upTxt == "" ? "EXIT" : upTxt + " · EXIT"
-        upTip := upTip + (upTip == "" ? "" : "\n") + "EXIT · " + exitWhy + " (" + (exitWhy == "Trend" ? "레짐 Stage 4 진입" : "종가가 손절/트레일 " + f_px(stopPx) + " 아래") + ") → 다음 봉 시가 청산"
+        upTip := upTip + (upTip == "" ? "" : "\n") + "EXIT · " + exitWhy + " (" + (exitWhy == "Trend" ? "레짐 Stage 4 진입" : exitWhy == "Stage" ? "Stage 2 종료 — 레짐 MA가 평탄해지거나 꺾임 (" + exitMode + ")" : "종가가 손절/트레일 " + f_px(stopPx) + " 아래") + ") → 다음 봉 시가 청산"
         upCol := cRed
         upTc  := color.white
     if showWarnings and evBreak
@@ -732,7 +799,7 @@ if barstate.isconfirmed and showLabels
         upTc  := color.white
     if showWarnings and evTopWarn
         upTxt := upTxt == "" ? "◆ TOP" : upTxt + " · ◆ TOP"
-        upTip := upTip + (upTip == "" ? "" : "\n") + "과열 고점 신호. 보유 중이면 부분 익절을 고려하세요."
+        upTip := upTip + (upTip == "" ? "" : "\n") + (pos == 1 ? "과열 고점 — Trend Hold 모드라 익절하지 않고 Stage 2가 끝날 때까지 보유합니다 (정보용). 과열에서 일부 팔고 싶으면 Exit Mode를 Trend Hold + TOP으로." : "과열 고점 신호. 보유 중이면 부분 익절을 고려하세요.")
         upCol := na(upCol) ? color.new(cOrange, 40) : upCol
     if upTxt != ""
         label.new(bar_index, high, upTxt, yloc=yloc.abovebar, style=label.style_label_down, color=upCol, textcolor=upTc, size=lblSize, tooltip=upTip)
@@ -743,7 +810,7 @@ if barstate.isconfirmed and showLabels
 // ============================================================
 dashPos = dashPosIn == "Middle Right" ? position.middle_right : dashPosIn == "Bottom Right" ? position.bottom_right : dashPosIn == "Top Left" ? position.top_left : dashPosIn == "Bottom Left" ? position.bottom_left : position.top_right
 dashTs  = dashTextIn == "Tiny" ? size.tiny : dashTextIn == "Normal" ? size.normal : size.small
-var table dash = table.new(dashPos, 2, 21, bgcolor=color.new(cPanel, 8), frame_color=color.new(cGray, 50), frame_width=1, border_color=color.new(cGray, 75), border_width=1)
+var table dash = table.new(dashPos, 2, 22, bgcolor=color.new(cPanel, 8), frame_color=color.new(cGray, 50), frame_width=1, border_color=color.new(cGray, 75), border_width=1)
 
 f_row(table t, int r, string k, string v, color vc, string ts, string tip = "") =>
     table.cell(t, 0, r, k, text_color=color.new(color.white, 35), text_size=ts, text_halign=text.align_left, tooltip=tip)
@@ -759,6 +826,9 @@ recentRev     = revSigBars <= 10
 btmBars       = ta.barssince(btmWarn)
 recentBtm     = btmBars <= 10
 rvSetup       = wIs and wLB < revWin
+// 🔒 이유 (대시보드 Reversal 행 · Reversal Map 공용): rvLock = REV가 막힌 이유, revLock = 지금 레짐에서 EARLY 진입이 막힘
+rvLock        = not (enREV and sigMode != "Conservative") ? "REV 꺼짐" : not dataOK ? "THIN DATA" : blockZombie and isZombie ? "좀비 필터" : not htfOK ? (isIntra ? "일봉" : "주봉") + " 과매도 아님" : not mktOK ? (na(mktDD) ? "시장 데이터 없음" : "시장 " + f_pct(mktDD * 100)) : ""
+revLock       = not recentRev and not recentBtm and revStep >= 1 and revStep <= 2 and not rvSetup and not permEA and (regStage == 1 or regStage == 4)
 
 int  dashTargetTime = dashFollowScroll ? chart.right_visible_bar_time : na
 bool isDashBar      = dashMode != "Off" and (na(dashTargetTime) ? barstate.islast : (time >= dashTargetTime and nz(time[1]) < dashTargetTime) or (barstate.islast and time < dashTargetTime))
@@ -806,11 +876,9 @@ if isDashBar
 
     // Reversal: 바닥 반전 진행. ✅ V-REV / ◇ 반전 보류 / ◎ 투매 저점(REV 대기) 은 레짐과 무관하게 표시
     // EARLY 3단계(① 소진 → ② HL → ✅ CONFIRMED)는 Stage 4·1에서만 표시 (Stage 2·3에서는 지난 바닥의 오래된 단계 대신 추세 상태)
-    string rvLock  = not (enREV and sigMode != "Conservative") ? "REV 꺼짐" : not dataOK ? "THIN DATA" : blockZombie and isZombie ? "좀비 필터" : not htfOK ? (isIntra ? "일봉" : "주봉") + " 과매도 아님" : not mktOK ? (na(mktDD) ? "시장 데이터 없음" : "시장 " + f_pct(mktDD * 100)) : ""
     string revTxt  = recentRev ? "✅ V-REV" + (revSigBars > 0 ? " · " + str.tostring(revSigBars) + "봉 전" : "") : revStep == 3 ? "✅ CONFIRMED" + (earlyTrigBars > 0 ? " · " + str.tostring(earlyTrigBars) + "봉 전" : "") : recentBtm ? "◇ 반전 보류" + (btmBars > 0 ? " · " + str.tostring(btmBars) + "봉 전" : "") + " · " + btmWhy : rvSetup ? "◎ 투매 " + f_px(wLow) + (rvLock != "" ? " · 🔒 " + rvLock : " · > " + f_px(math.max(wHigh, high))) : regStage == 2 ? "— UPTREND" : regStage == 3 ? "— 고점 구간" : regStage == 0 ? "—" : revStep == 2 ? "② HL ✓ " + f_px(hlPrice) + (sh1Broken ? " · 새 고점 대기" : " · > " + f_px(sh1)) : revStep == 1 ? "① 소진 ✓ " + f_px(exhLow) + " · HL 대기" : "⏳ 소진 대기"
-    bool   revLock = not recentRev and not recentBtm and revStep >= 1 and revStep <= 2 and not rvSetup and not permEA and (regStage == 1 or regStage == 4)
     color  revCol  = recentRev or revStep == 3 ? tGreen : recentBtm ? tOrange : rvSetup ? (rvLock != "" ? tOrange : tPurple) : regStage == 2 ? tGreen : regStage == 3 or regStage == 0 ? tGray : revStep == 2 ? tCyan : revStep == 1 ? tOrange : tGray
-    string revTip  = "바닥 반전 진행\n✅ V-REV: 투매 저점 후 5봉 안 반전 봉 + 상위 TF 과매도 + 시장 동반 투매 (10봉 표시)\n◇ 반전 보류: 반전 패턴은 나왔지만 시장 정상(개별 하락형) · 좀비 필터로 매수하지 않음 (차트의 ◇ BOTTOM)\n◎ 투매 X · > Y: 투매 저점 X 확인, Y 위 종가(양봉 · 봉 상단 절반)면 REV\n◎ … 🔒 이유: THIN DATA / 좀비 필터 / 상위 TF 과매도 아님 / 시장 정상(개별 악재형 하락 — 과거 반등 실패가 많았음)\n월봉은 투매 판정을 로그(퍼센트) 가격으로 합니다\n① 소진 → ② Higher Low → ✅ CONFIRMED: EARLY 3단계 (Stage 4·1)\n🔒 (EARLY) = 지금 레짐에서는 EARLY 진입이 막혀 있음 (Balanced: Stage 1 또는 하락이 둔화된 Stage 4에서만 허용)"
+    string revTip  = "바닥 반전 진행\n✅ V-REV: 투매 저점 후 5봉 안 반전 봉 + 상위 TF 과매도 + 시장 동반 투매 (10봉 표시)\n◇ 반전 보류: 반전 패턴은 나왔지만 시장 정상(개별 하락형) · 좀비 필터로 매수하지 않음 (차트의 ◇ BOTTOM)\n◎ 투매 X · > Y: 투매 저점 X 확인, Y 위 종가(양봉 · 봉 상단 절반)면 REV\n◎ … 🔒 이유: THIN DATA / 좀비 필터 / 상위 TF 과매도 아님 / 시장 정상(개별 악재형 하락 — 과거 반등 실패가 많았음)\n월봉은 투매 판정을 로그(퍼센트) 가격으로 합니다\n① 소진 → ② Higher Low → ✅ CONFIRMED: EARLY 3단계 (Stage 4·1)\n🔒 (EARLY) = 지금 레짐에서는 EARLY 진입이 막혀 있음 (Balanced: Stage 1 또는 하락이 둔화된 Stage 4에서만 허용)\n차트의 Reversal Map: 주황 점선 소진 저점 · 청록 점선 HL · 초록 파선 확인선 · 보라 투매 저점 / REV 트리거"
     f_row(dash, 2, "Reversal", revTxt + (revLock ? " 🔒" : ""), revCol, dashTs, revTip)
 
     string setupTxt = pos == 1 ? sigType + (sigType == "REV" ? "" : " " + f_gradeTxt(sigType, sigGrade)) + " · in trade" : armedType != "" ? armedType + " armed" + (armedType == "REV" ? "" : " · " + f_gradeTxt(armedType, armedGrade)) : "—"
@@ -820,32 +888,39 @@ if isDashBar
     float stopShow = pos == 1 ? stopPx : armedStop
     float refPx    = pos == 1 ? close : armedTrig
     f_row(dash, 5, "Stop · Risk", na(stopShow) ? "—" : f_px(stopShow) + " · " + f_pct((stopShow / refPx - 1) * 100), tRed, dashTs)
-    f_row(dash, 6, "Target · Trail", pos == 1 ? "T1 " + (t1Done ? "✓" : f_px(t1Px)) + " · " + (trailOn ? "Trail ON" : "Trail @+1R") : "—", tGreen, dashTs)
+    string exitPlan = pos != 1 ? "—" : useSwing ? "T1 " + (t1Done ? "✓" : f_px(t1Px)) + " · " + (trailOn ? "Trail ON" : "Trail @+1R") : seenS2 ? "Hold · Stage 2 유지" + (useTopTrim ? " · TOP " + str.tostring(trims) + "/2" : "") : "Stage 2 대기 · 손절 유지"
+    f_row(dash, 6, "Exit Plan", exitPlan, tGreen, dashTs, "매도 방식: " + f_exitTxt() + "\n초기 손절 · Stage 4 전환 청산은 모든 모드 공통")
+
+    // 모드: 실제 적용 중인 매도 방식 · S2 · 시장 필터. TSXV는 일봉 · 주봉 · 장중 경고
+    string modeTxt = exitMode + (useS2 ? " · S2" : "") + (useMktF ? " · 시장" + (mktUp ? "↑" : "↓") : "") + (isJunior ? " · TSXV" + (isMonthly ? "" : " ⚠") : "")
+    color  modeCol = (isJunior and not isMonthly) or (useMktF and not mktUp) ? tOrange : tWhite
+    string modeTip = "매도 방식: " + f_exitTxt() + "\nExit Mode " + exitModeIn + (exitModeIn == "Auto" ? " → " + exitMode : "") + " · S2 " + (useS2 ? "켬" : "끔") + " · 시장 필터 " + (useMktF ? "켬 (" + benchSym + (mktUp ? " 장기 평균 위)" : " 장기 평균 아래 → PB · BO · EARLY · S2 진입 보류)") : "끔") + "\nAuto 결정표 (v9.4 · 63종목 검증): 일봉 Trend Hold + TOP · S2 · 시장 필터 / 1h Trend Hold + TOP / 주봉 · 월봉 · 4h Swing / TSXV Swing" + (isJunior and not isMonthly ? "\n⚠ TSXV 주니어: 일봉 · 주봉 · 장중은 검증에서 어떤 매도 방식도 비용 포함 우위가 뚜렷하지 않았습니다 (2016–2026 일봉 PF 0.9). 월봉 기준 판단을 권장합니다." : "")
+    f_row(dash, 7, "Mode", modeTxt, modeCol, dashTs, modeTip)
 
     string pillTxt = pos == 1 ? sigPillars : armedType != "" ? armedPills : f_pill(pMom, "Mom") + " " + f_pill(pFlow, "Flow") + " " + f_pill(pRS, "RS")
-    f_row(dash, 7, "Pillars", pillTxt, tWhite, dashTs)
-    f_row(dash, 8, "RSI · MACD", f_num(rsiVal, "0") + " · MACD " + (macdHist > macdHist[1] ? "▲" : "▼"), rsiVal >= 70 ? tOrange : rsiVal <= 30 ? tCyan : tWhite, dashTs)
-    f_row(dash, 9, "Location", "52W " + f_num(range52w, "0") + "% · MA " + f_pct((close / regMA - 1) * 100), tWhite, dashTs)
-    f_row(dash, 10, "Liquidity", f_money(advDollar) + "/d · tick " + f_num(tickPct, "0.0") + "% · thin " + f_num(thinPct, "0") + "%", dataOK ? tWhite : tOrange, dashTs)
+    f_row(dash, 8, "Pillars", pillTxt, tWhite, dashTs)
+    f_row(dash, 9, "RSI · MACD", f_num(rsiVal, "0") + " · MACD " + (macdHist > macdHist[1] ? "▲" : "▼"), rsiVal >= 70 ? tOrange : rsiVal <= 30 ? tCyan : tWhite, dashTs)
+    f_row(dash, 10, "Location", "52W " + f_num(range52w, "0") + "% · MA " + f_pct((close / regMA - 1) * 100), tWhite, dashTs)
+    f_row(dash, 11, "Liquidity", f_money(advDollar) + "/d · tick " + f_num(tickPct, "0.0") + "% · thin " + f_num(thinPct, "0") + "%", dataOK ? tWhite : tOrange, dashTs)
 
     // ── 성과: 거래 단위, 비용 포함. n < 20은 통계적으로 의미 약함 ──
     string pfTxt = grossLoss > 0 ? f_num(profitF, "0.00") : nTrades > 0 ? "∞" : "—"
     color  btCol = nTrades < 20 ? tGray : grossLoss == 0 or profitF >= 1.3 ? tGreen : profitF >= 1.0 ? tOrange : tRed
-    f_row(dash, 11, "Backtest", "n" + str.tostring(nTrades) + (nTrades < 20 ? " (표본↓)" : "") + " · WR " + f_num(winRate, "0") + "% · PF " + pfTxt, btCol, dashTs)
-    f_row(dash, 12, "Edge · MDD", "E " + f_r(expR) + " · MDD " + f_num(maxDD * 100, "0") + "% (B&H " + f_num(bhMaxDD * 100, "0") + "%)", btCol, dashTs)
+    f_row(dash, 12, "Backtest", "n" + str.tostring(nTrades) + (nTrades < 20 ? " (표본↓)" : "") + " · WR " + f_num(winRate, "0") + "% · PF " + pfTxt, btCol, dashTs)
+    f_row(dash, 13, "Edge · MDD", "E " + f_r(expR) + " · MDD " + f_num(maxDD * 100, "0") + "% (B&H " + f_num(bhMaxDD * 100, "0") + "%)", btCol, dashTs)
 
-    int asOfRow = 13
+    int asOfRow = 14
     if dashMode == "Full"
-        f_row(dash, 13, "Return", f_pct(netRetPct) + " vs B&H " + f_pct(bhRetPct), netRetPct >= nz(bhRetPct) ? tGreen : tOrange, dashTs)
-        f_row(dash, 14, "By Type (win/n)", "PB " + str.tostring(wPB) + "/" + str.tostring(nPB) + " · BO " + str.tostring(wBO) + "/" + str.tostring(nBO) + " · EA " + str.tostring(wEA) + "/" + str.tostring(nEA) + " · RV " + str.tostring(wRV) + "/" + str.tostring(nRV), tWhite, dashTs)
-        f_row(dash, 15, "Hold · Exposure", f_num(avgHold, "0") + " bars · " + f_num(exposure, "0") + "%", tWhite, dashTs)
+        f_row(dash, 14, "Return", f_pct(netRetPct) + " vs B&H " + f_pct(bhRetPct), netRetPct >= nz(bhRetPct) ? tGreen : tOrange, dashTs)
+        f_row(dash, 15, "By Type (win/n)", "PB " + str.tostring(wPB) + "/" + str.tostring(nPB) + " · BO " + str.tostring(wBO) + "/" + str.tostring(nBO) + " · S2 " + str.tostring(wS2) + "/" + str.tostring(nS2) + " · EA " + str.tostring(wEA) + "/" + str.tostring(nEA) + " · RV " + str.tostring(wRV) + "/" + str.tostring(nRV), tWhite, dashTs)
+        f_row(dash, 16, "Hold · Exposure", f_num(avgHold, "0") + " bars · " + f_num(exposure, "0") + "%", tWhite, dashTs)
         float riskDist = na(stopShow) or na(refPx) or refPx <= stopShow ? na : (refPx - stopShow) / refPx * 100
-        f_row(dash, 16, "Size @ " + f_num(riskPct, "0.0") + "% risk", na(riskDist) ? "—" : f_num(math.min(100.0, riskPct / riskDist * 100), "0") + "% of equity", tWhite, dashTs)
+        f_row(dash, 17, "Size @ " + f_num(riskPct, "0.0") + "% risk", na(riskDist) ? "—" : f_num(math.min(100.0, riskPct / riskDist * 100), "0") + "% of equity", tWhite, dashTs)
         string healthTxt = isZombie ? "💩 ZOMBIE" : healthScore == 4 ? "🟢 HEALTHY" : healthScore == 3 ? "🟡 FAIR" : "🟠 WEAK"
-        f_row(dash, 17, "Health", healthTxt + (blockZombie and isZombie ? " · 진입 차단" : ""), isZombie ? tRed : healthScore >= 3 ? tGreen : tOrange, dashTs)
-        f_row(dash, 18, "Macro", "VIX " + f_num(vixClose, "0.0") + " · DXY " + (dxyStrong ? "▲" : "▼") + " · " + str.tostring(macroRisk) + "/3" + (useMacro and macroRisk >= 2 ? " (+1 등급)" : ""), macroRisk >= 2 ? tOrange : tWhite, dashTs)
-        f_row(dash, 19, "RS · ADX", benchSym + " " + (pRS ? "▲" : "▼") + " · ADX " + f_num(adxVal, "0"), pRS ? tGreen : tGray, dashTs)
-        asOfRow := 20
+        f_row(dash, 18, "Health", healthTxt + (blockZombie and isZombie ? " · 진입 차단" : ""), isZombie ? tRed : healthScore >= 3 ? tGreen : tOrange, dashTs)
+        f_row(dash, 19, "Macro", "VIX " + f_num(vixClose, "0.0") + " · DXY " + (dxyStrong ? "▲" : "▼") + " · " + str.tostring(macroRisk) + "/3" + (useMacro and macroRisk >= 2 ? " (+1 등급)" : ""), macroRisk >= 2 ? tOrange : tWhite, dashTs)
+        f_row(dash, 20, "RS · ADX", benchSym + " " + (pRS ? "▲" : "▼") + " · ADX " + f_num(adxVal, "0"), pRS ? tGreen : tGray, dashTs)
+        asOfRow := 21
 
     // ── 기준 봉: 표가 어느 시점 값인지 ──
     string asOfTxt = "📅 " + str.format_time(time, timeframe.isintraday ? "yyyy-MM-dd HH:mm" : "yyyy-MM-dd", syminfo.timezone)
@@ -853,6 +928,44 @@ if isDashBar
     color  viewBg  = barstate.islast ? color.new(color.teal, 30) : color.new(cOrange, 10)
     table.cell(dash, 0, asOfRow, asOfTxt, text_color=color.white, text_size=dashTs, text_halign=text.align_left, bgcolor=viewBg)
     table.cell(dash, 1, asOfRow, viewTxt, text_color=color.white, text_size=dashTs, text_halign=text.align_right, bgcolor=viewBg)
+
+// ============================================================
+// ─────────────────── REVERSAL MAP (Reversal 행의 단계를 차트 선으로) ──
+// ── 대시보드 기준 봉 하나에서만 그림 → 과거 구간을 선으로 덮지 않고, 스크롤하면 그 시점의 지도 ──
+// ============================================================
+// 확인선(직전 스윙 고점)과 HL 피벗이 찍힌 봉
+var int sh1BarD = na
+var int hlBarD  = na
+if newPH
+    sh1BarD := bar_index - swLen
+if not na(hlPrice) and hlPrice != nz(hlPrice[1])
+    hlBarD := sl1Bar
+
+var array<line>  rmLines  = array.new<line>()
+var array<label> rmLabels = array.new<label>()
+
+f_rmLevel(int x1, float y, color c, string st, string txt, string tip) =>
+    int xr = bar_index + 3
+    array.push(rmLines, line.new(x1, y, xr, y, color=c, style=st, width=1))
+    array.push(rmLabels, label.new(xr, y, txt, style=label.style_label_left, color=color.new(c, 100), textcolor=c, size=lblSize, tooltip=tip))
+
+mapBar = showRevMap and (dashMode == "Off" ? barstate.islast : isDashBar)
+if mapBar
+    while array.size(rmLines) > 0
+        line.delete(array.pop(rmLines))
+    while array.size(rmLabels) > 0
+        label.delete(array.pop(rmLabels))
+    if pos == 0 and not pendBuy
+        if rvSetup
+            float rTrig = math.max(wHigh, high)
+            f_rmLevel(wBar, wLow, cPurple, line.style_dotted, "투매 " + f_px(wLow), "투매 저점 — V자 반전(REV)의 출발점. 더 낮은 투매 저점이 나오면 거기서부터 다시 셉니다")
+            f_rmLevel(wBar, rTrig, cPurple, line.style_dashed, "REV > " + f_px(rTrig) + (rvLock != "" ? " 🔒" : ""), "앞으로 " + str.tostring(revWin - wLB) + "봉 안에 이 위 종가(양봉 · 봉 상단 절반) = V자 반전" + (rvLock != "" ? "\n🔒 " + rvLock + " → 반전이 나와도 매수 대신 ◇ BOTTOM 표시" : ""))
+        else if (regStage == 1 or regStage == 4) and revStep >= 1 and revStep <= 2
+            f_rmLevel(exhLowBar, exhLow, cOrange, line.style_dotted, "소진 " + f_px(exhLow), "① 소진 저점 — 매도가 바닥난 흔적(투매 · 강세 다이버전스 · 스프링 · 투매 저점)이 나온 가격. 이 아래 종가면 이번 반전 시도는 무효")
+            if revStep == 2 and not na(hlBarD)
+                f_rmLevel(hlBarD, hlPrice, cCyan, line.style_dotted, "HL " + f_px(hlPrice), "② Higher Low — 소진 저점보다 높은 두 번째 저점. 이 아래 종가면 HL을 다시 기다립니다")
+            if not sh1Broken and not na(sh1BarD) and sh1 > exhLow
+                f_rmLevel(sh1BarD, sh1, cGreen, line.style_dashed, "확인선 " + f_px(sh1) + (revLock ? " 🔒" : ""), (revStep == 2 ? "" : "HL이 생긴 뒤 ") + "이 위 종가 + EMA20 위 = ✅ CONFIRMED (쌍바닥 · 역헤드앤숄더의 넥라인과 같은 역할)" + (revLock ? "\n🔒 지금 레짐에서는 EARLY 매수가 막혀 있어, 확인돼도 매수 신호는 나오지 않습니다" : ""))
 
 // ============================================================
 // ─────────────────── DATA WINDOW (커서 위치 봉의 값) ──────────
@@ -882,8 +995,9 @@ plot(expR, "Expectancy (R)", color=cGray, display=dw, editable=false, precision=
 alertcondition(barstate.isconfirmed and evBuy, "▲ BUY (any)", "{{ticker}} ▲ BUY — Institutional v9 @ {{close}}")
 alertcondition(barstate.isconfirmed and evBuy and evType == "EARLY", "▲ BUY EARLY", "{{ticker}} ▲ BUY·EARLY (역추세, 절반 사이즈) @ {{close}}")
 alertcondition(barstate.isconfirmed and evBuy and evType == "REV", "▲ BUY REV", "{{ticker}} ▲ BUY·REV (투매 후 V자 반전, 역추세 · 절반 사이즈) @ {{close}}")
+alertcondition(barstate.isconfirmed and evBuy and evType == "S2", "▲ BUY S2", "{{ticker}} ▲ BUY·S2 (Stage 2 전환) @ {{close}}")
 alertcondition(barstate.isconfirmed and (evT1 or evTop), "◆ TRIM", "{{ticker}} ◆ TRIM (부분 익절) @ {{close}}")
-alertcondition(barstate.isconfirmed and evExit, "▼ EXIT", "{{ticker}} ▼ EXIT (손절·트레일·추세붕괴) @ {{close}}")
+alertcondition(barstate.isconfirmed and evExit, "▼ EXIT", "{{ticker}} ▼ EXIT (손절·트레일·Stage 2 종료·추세붕괴) @ {{close}}")
 alertcondition(barstate.isconfirmed and evBreak, "▼ BREAKDOWN", "{{ticker}} ▼ BREAKDOWN (Stage → 4) @ {{close}}")
 alertcondition(barstate.isconfirmed and evTopWarn, "◆ TOP", "{{ticker}} ◆ TOP (과열 고점) @ {{close}}")
 alertcondition(btmWarn, "◇ BOTTOM", "{{ticker}} ◇ BOTTOM (바닥 반전 · 지표는 매수 보류) @ {{close}}")
